@@ -43,17 +43,15 @@ function chooseCpuMove(chess: Chess, difficulty: Difficulty): Move | null {
   const moves = chess.moves({ verbose: true }) as Move[];
   if (!moves.length) return null;
 
-  if (difficulty === "easy") {
-    return randomItem(moves) ?? null;
-  }
+  if (difficulty === "easy") return randomItem(moves) ?? null;
 
   if (difficulty === "medium") {
     const captures = moves.filter(isCapture);
     return (randomItem(captures.length ? captures : moves) ?? null);
   }
 
-  // hard: 1-ply lookahead by material eval
-  const cpuColor = chess.turn(); // whose turn now
+  // hard: 1-ply material lookahead
+  const cpuColor = chess.turn();
   let best: { move: Move; score: number } | null = null;
 
   for (const m of moves) {
@@ -63,9 +61,7 @@ function chooseCpuMove(chess: Chess, difficulty: Difficulty): Move | null {
     const s = materialScore(copy);
     const objective = cpuColor === "w" ? s : -s;
 
-    if (!best || objective > best.score) {
-      best = { move: m, score: objective };
-    }
+    if (!best || objective > best.score) best = { move: m, score: objective };
   }
 
   return best?.move ?? null;
@@ -81,8 +77,7 @@ function statusLabel(g: Chess) {
 
 function winnerLabelIfAny(g: Chess) {
   if (!g.isCheckmate()) return null;
-  // In checkmate, side to move is checkmated => winner is the other side.
-  const loser = g.turn(); // 'w' or 'b'
+  const loser = g.turn();
   const winner = loser === "w" ? "Black" : "White";
   return winner;
 }
@@ -103,6 +98,7 @@ export default function Home() {
 
   // Scoreboard (session-local)
   const [score, setScore] = useState({ white: 0, black: 0, draws: 0 });
+  const [lastCountedFen, setLastCountedFen] = useState<string>("");
 
   const fen = useMemo(() => game.fen(), [game]);
 
@@ -112,7 +108,6 @@ export default function Home() {
   }
 
   function computeLegalTargets(from: Square, g: Chess) {
-    // chess.js only returns legal moves (including "must respond to check" rule)
     const moves = g.moves({ square: from, verbose: true }) as Move[];
     return new Set(moves.map((m) => m.to as Square));
   }
@@ -135,11 +130,6 @@ export default function Home() {
     return ok;
   }
 
-  function isGameOverNow() {
-    const g = new Chess(game.fen());
-    return g.isGameOver();
-  }
-
   function newGame() {
     const g = new Chess();
 
@@ -152,6 +142,8 @@ export default function Home() {
     setOrientation(hc === "w" ? "white" : "black");
     setGame(g);
     clearSelection();
+    // reset lastCountedFen so a new terminal position counts
+    setLastCountedFen("");
   }
 
   function tryMove(from: Square, to: Square) {
@@ -161,18 +153,19 @@ export default function Home() {
       const piece = g.get(from);
       if (!piece) return false;
 
-      // Enforce turn
+      // Must be side to move
       if (piece.color !== g.turn()) return false;
 
-      // In CPU mode, user can only move their color
+      // In CPU mode, only allow user to move their color
       if (mode === "cpu" && g.turn() !== humanColor) return false;
 
-      // This will fail if illegal OR if it doesn't resolve check when in check
+      // chess.js rejects illegal moves & enforces "must respond to check"
       const move = g.move({ from, to, promotion: "q" });
       return !!move;
     });
   }
 
+  // Drag-drop support
   function onDrop(sourceSquare: string, targetSquare: string) {
     try {
       const ok = tryMove(sourceSquare as Square, targetSquare as Square);
@@ -184,73 +177,74 @@ export default function Home() {
     }
   }
 
-  function onPieceClick(_piece: string, square: string) {
+  // Reliable tap-to-highlight: use onSquareClick (works best in Telegram)
+  function onSquareClick(square: string) {
     try {
       const sq = square as Square;
       const g = new Chess(game.fen());
 
       if (g.isGameOver()) {
         clearSelection();
-        return;
+        return false;
       }
 
-      const p = g.get(sq);
-      if (!p) {
-        clearSelection();
-        return;
-      }
-
-      // Only select pieces of the side to move
-      if (p.color !== g.turn()) {
-        clearSelection();
-        return;
-      }
-
-      // In CPU mode, only select your pieces on your turn
-      if (mode === "cpu" && g.turn() !== humanColor) {
-        clearSelection();
-        return;
-      }
-
-      setSelected(sq);
-      setLegalToSquares(computeLegalTargets(sq, g)); // legal moves only (respects check rule)
-    } catch {
-      clearSelection();
-    }
-  }
-
-  function onSquareClick(square: string) {
-    try {
-      const target = square as Square;
-
-      if (selected && legalToSquares.has(target)) {
-        const ok = tryMove(selected, target);
+      // If selecting a destination for an already-selected piece
+      if (selected && legalToSquares.has(sq)) {
+        const ok = tryMove(selected, sq);
         clearSelection();
         return ok;
       }
 
-      clearSelection();
-      return false;
+      // Otherwise treat click as selecting a piece (if valid)
+      const p = g.get(sq);
+      if (!p) {
+        clearSelection();
+        return false;
+      }
+
+      // Must be correct turn
+      if (p.color !== g.turn()) {
+        clearSelection();
+        return false;
+      }
+
+      // In CPU mode, only allow selecting your pieces on your turn
+      if (mode === "cpu" && g.turn() !== humanColor) {
+        clearSelection();
+        return false;
+      }
+
+      setSelected(sq);
+      setLegalToSquares(computeLegalTargets(sq, g));
+      return true;
     } catch {
       clearSelection();
       return false;
     }
   }
 
-  // Highlight squares
+  // Optional: keep onPieceClick too, but it’s not required anymore
+  function onPieceClick(_piece: string, square: string) {
+    // Just forward to onSquareClick for consistency
+    return onSquareClick(square);
+  }
+
+  // Stronger highlight styles
   const customSquareStyles = useMemo(() => {
     const styles: Record<string, React.CSSProperties> = {};
 
     if (selected) {
       styles[selected] = {
-        outline: "2px solid rgba(255,255,255,0.65)",
-        outlineOffset: "-2px",
+        outline: "3px solid rgba(255,255,255,0.7)",
+        outlineOffset: "-3px",
+        backgroundColor: "rgba(255,255,255,0.08)",
       };
     }
 
     for (const sq of legalToSquares) {
       styles[sq] = {
-        boxShadow: "inset 0 0 0 3px rgba(0, 200, 255, 0.35)",
+        backgroundColor: "rgba(0, 200, 255, 0.20)",
+        boxShadow: "inset 0 0 0 3px rgba(0, 200, 255, 0.45)",
         borderRadius: "6px",
       };
     }
@@ -267,22 +261,15 @@ export default function Home() {
 
   const winnerText = useMemo(() => {
     const g = new Chess(game.fen());
-    return winnerLabelIfAny(g); // "White" | "Black" | null
+    return winnerLabelIfAny(g);
   }, [game]);
 
-  // Score update when game ends (checkmate/draw/stalemate)
-  useEffect(() => {
+  const gameOver = useMemo(() => {
     const g = new Chess(game.fen());
-    if (!g.isGameOver()) return;
-
-    // Only count once per terminal position:
-    // We'll mark by fen + a ref-like state in memory using sessionStorage-ish approach.
-    // Simple approach: store last counted terminal fen in a global var (state)
+    return g.isGameOver();
   }, [game]);
 
-  // We’ll do a simple in-state “lastCountedFen” to avoid double-counting
-  const [lastCountedFen, setLastCountedFen] = useState<string>("");
-
+  // Score update once per terminal position
   useEffect(() => {
     const g = new Chess(game.fen());
     if (!g.isGameOver()) return;
@@ -298,7 +285,7 @@ export default function Home() {
     setLastCountedFen(terminalFen);
   }, [game, lastCountedFen]);
 
-  // CPU auto-move when it’s CPU’s turn
+  // CPU auto-move
   useEffect(() => {
     if (mode !== "cpu") return;
 
@@ -321,6 +308,7 @@ export default function Home() {
           mut.move(move);
           return true;
         });
+
         clearSelection();
       } catch {
         // ignore
@@ -330,13 +318,19 @@ export default function Home() {
     return () => clearTimeout(t);
   }, [game, mode, humanColor, difficulty]);
 
-  // Reset game when switching mode (keeps things predictable)
+  // Predictable: reset when switching mode
   useEffect(() => {
     newGame();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  const gameOver = isGameOverNow();
+  // Loud status pill classes
+  const statusClass =
+    statusText === "Checkmate"
+      ? "text-white bg-red-600/80 border border-red-400/40 shadow-[0_0_18px_rgba(255,0,0,0.25)]"
+      : statusText === "Check"
+      ? "text-white bg-red-500/70 border border-red-300/40 shadow-[0_0_18px_rgba(255,0,0,0.22)]"
+      : "text-white/80 bg-white/5 border border-white/10";
 
   return (
     <main className="min-h-screen bg-black text-white px-4 pt-3 pb-6 overflow-y-auto">
@@ -346,7 +340,7 @@ export default function Home() {
           <div>
             <h1 className="text-2xl font-semibold">PaperLink Play</h1>
             <p className="text-white/60 text-sm">Chess MVP</p>
-            <p className="text-xs text-white/30">build: chessboard-v3</p>
+            <p className="text-xs text-white/30">build: chessboard-v4</p>
           </div>
 
           <button
@@ -359,9 +353,15 @@ export default function Home() {
 
         {/* Scoreboard */}
         <div className="rounded-2xl border border-white/10 p-3 text-sm text-white/75 flex items-center justify-between">
-          <div>White: <span className="text-white">{score.white}</span></div>
-          <div>Draws: <span className="text-white">{score.draws}</span></div>
-          <div>Black: <span className="text-white">{score.black}</span></div>
+          <div>
+            White: <span className="text-white">{score.white}</span>
+          </div>
+          <div>
+            Draws: <span className="text-white">{score.draws}</span>
+          </div>
+          <div>
+            Black: <span className="text-white">{score.black}</span>
+          </div>
         </div>
 
         {/* Controls */}
@@ -416,23 +416,18 @@ export default function Home() {
           </div>
 
           <p className="text-xs text-white/40">
-            Tip: tap a piece to see legal moves. If you’re in <b>Check</b>, only moves that cancel the check are allowed.
+            Tap a piece/square to highlight legal moves, then tap a highlighted square to move.
+            If you’re in <b>Check</b>, only escape moves highlight.
           </p>
         </div>
 
-        {/* Turn + Status banner */}
+        {/* Turn + Loud status pill */}
         <div className="rounded-2xl border border-white/10 p-3 text-sm flex items-center justify-between">
           <div className="text-white/70">
             <span className="text-white/50">Turn:</span> {turnText}
           </div>
 
-          <div
-            className={[
-              "text-sm font-medium",
-              statusText === "Checkmate" ? "text-red-300" : "",
-              statusText === "Check" ? "text-yellow-200" : "",
-            ].join(" ")}
-          >
+          <div className={`px-3 py-1 rounded-full text-sm font-semibold ${statusClass}`}>
             {statusText}
           </div>
         </div>
@@ -457,14 +452,14 @@ export default function Home() {
           <Chessboard
             position={fen}
             onPieceDrop={onDrop}
-            onPieceClick={onPieceClick}
             onSquareClick={onSquareClick}
+            onPieceClick={onPieceClick}
             customSquareStyles={customSquareStyles}
             boardOrientation={orientation}
           />
         </div>
 
-        {/* Footer info */}
+        {/* Footer */}
         <div className="rounded-2xl border border-white/10 p-3 text-xs text-white/50">
           Mode: {mode === "cpu" ? `CPU (${difficulty})` : "Friend (local pass-and-play)"} ·{" "}
           {mode === "cpu" ? `You: ${humanColor === "w" ? "White" : "Black"}` : "Online friend play: next"}
