@@ -43,6 +43,7 @@ export default function Home() {
           <div>
             <h1 className="text-2xl font-semibold">PaperLink Play</h1>
             <p className="text-white/60 text-sm">Chess (local MVP)</p>
+            <p className="text-xs text-white/30">build: chessboard-v1</p>
           </div>
 
           <button
@@ -70,7 +71,7 @@ export default function Home() {
               ? "Check"
               : "In play"}
           </div>
-          <div className="text-xs text-white/30">build: chessboard-v1</div>
+          <div className="text-xs text-white/40 pt-2">
             Next: create a real game + invite a friend.
           </div>
         </div>
