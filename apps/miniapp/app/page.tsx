@@ -97,12 +97,21 @@ export default function Home() {
 
   const fen = useMemo(() => game.fen(), [game]);
 
-  function safeGameMutate(fn: (g: Chess) => void) {
+  function safeGameMutate(fn: (g: Chess) => boolean | void): boolean {
+    let ok = false;
+
     setGame((prev) => {
       const next = new Chess(prev.fen());
-      fn(next);
+      try {
+        const result = fn(next);
+        ok = result === undefined ? ok : !!result;
+      } catch {
+        ok = false;
+      }
       return next;
     });
+
+    return ok;
   }
 
   function clearSelection() {
@@ -122,67 +131,49 @@ export default function Home() {
   }
 
   function tryMove(from: Square, to: Square) {
+  return safeGameMutate((g) => {
+    const piece = g.get(from);
+    if (!piece) return false;
+
+    // must be correct turn
+    if (piece.color !== g.turn()) return false;
+
+    // in cpu mode, only allow human to move
+    if (mode === "cpu" && g.turn() !== humanColor) return false;
+
+    const move = g.move({ from, to, promotion: "q" });
+    return !!move;
+  });
+}
+
+  // Drag-drop support
+  function onDrop(sourceSquare: string, targetSquare: string) {
     try {
-      let ok = false;
-
-      safeGameMutate((g) => {
-        const piece = g.get(from);
-        if (!piece) {
-          ok = false;
-          return;
-        }
-
-        // Turn enforcement:
-        // - In friend mode: must move the side to play
-        // - In cpu mode: must be human’s turn AND moving the correct side
-        if (piece.color !== g.turn()) {
-          ok = false;
-          return;
-        }
-        if (mode === "cpu" && g.turn() !== humanColor) {
-          ok = false;
-          return;
-        }
-
-        const move = g.move({ from, to, promotion: "q" });
-        ok = !!move;
-      });
-
+      const ok = tryMove(sourceSquare as Square, targetSquare as Square);
+      clearSelection();
       return ok;
     } catch {
+      clearSelection();
       return false;
     }
   }
 
-  // Drag-drop support
-  function onDrop(sourceSquare: string, targetSquare: string) {
-    const from = sourceSquare as Square;
-    const to = targetSquare as Square;
-
-    const ok = tryMove(from, to);
-    clearSelection();
-    return ok;
-  }
-
   // Click-to-highlight + click-to-move
-  function onPieceClick(piece: string, square: string) {
-    const sq = square as Square;
-
+  function onPieceClick(_piece: string, square: string) {
     try {
+      const sq = square as Square;
       const g = new Chess(game.fen());
       const p = g.get(sq);
-
-      // If clicking empty/invalid, reset
       if (!p) {
         clearSelection();
         return;
       }
 
-      // Enforce: can only select movable pieces (turn + mode rules)
       if (p.color !== g.turn()) {
         clearSelection();
         return;
       }
+
       if (mode === "cpu" && g.turn() !== humanColor) {
         clearSelection();
         return;
@@ -196,18 +187,21 @@ export default function Home() {
   }
 
   function onSquareClick(square: string) {
-    const target = square as Square;
+    try {
+      const target = square as Square;
 
-    // If we have a selected piece and target is legal, move
-    if (selected && legalToSquares.has(target)) {
-      const ok = tryMove(selected, target);
+      if (selected && legalToSquares.has(target)) {
+        const ok = tryMove(selected, target);
+        clearSelection();
+        return ok;
+      }
+
       clearSelection();
-      return ok;
+      return false;
+    } catch {
+      clearSelection();
+      return false;
     }
-
-    // Otherwise, clicking elsewhere clears selection
-    clearSelection();
-    return false;
   }
 
   // Highlight squares
