@@ -13,12 +13,10 @@ function randomItem<T>(arr: T[]): T | undefined {
 }
 
 function isCapture(m: Move) {
-  // chess.js verbose Move has flags; capture includes 'c' or 'e'
   return (m.flags || "").includes("c") || (m.flags || "").includes("e");
 }
 
 function materialScore(chess: Chess) {
-  // simple material evaluation (white positive)
   const pieceValues: Record<string, number> = {
     p: 1,
     n: 3,
@@ -50,12 +48,11 @@ function chooseCpuMove(chess: Chess, difficulty: Difficulty): Move | null {
   }
 
   if (difficulty === "medium") {
-    // Prefer captures; otherwise random
     const captures = moves.filter(isCapture);
     return (randomItem(captures.length ? captures : moves) ?? null);
   }
 
-  // hard: 1-ply lookahead by material evaluation
+  // hard: 1-ply lookahead by material eval
   const cpuColor = chess.turn(); // whose turn now
   let best: { move: Move; score: number } | null = null;
 
@@ -64,8 +61,6 @@ function chooseCpuMove(chess: Chess, difficulty: Difficulty): Move | null {
     copy.move(m);
 
     const s = materialScore(copy);
-    // If CPU is black, it wants LOWER score (more negative),
-    // if CPU is white, it wants HIGHER score.
     const objective = cpuColor === "w" ? s : -s;
 
     if (!best || objective > best.score) {
@@ -76,27 +71,53 @@ function chooseCpuMove(chess: Chess, difficulty: Difficulty): Move | null {
   return best?.move ?? null;
 }
 
+function statusLabel(g: Chess) {
+  if (g.isCheckmate()) return "Checkmate";
+  if (g.isStalemate()) return "Stalemate";
+  if (g.isDraw()) return "Draw";
+  if (g.isCheck()) return "Check";
+  return "In play";
+}
+
+function winnerLabelIfAny(g: Chess) {
+  if (!g.isCheckmate()) return null;
+  // In checkmate, side to move is checkmated => winner is the other side.
+  const loser = g.turn(); // 'w' or 'b'
+  const winner = loser === "w" ? "Black" : "White";
+  return winner;
+}
+
 export default function Home() {
-  // Core game
   const [game, setGame] = useState(() => new Chess());
 
-  // UX selection
+  // Settings
   const [mode, setMode] = useState<Mode>("cpu");
   const [difficulty, setDifficulty] = useState<Difficulty>("easy");
-
-  // “Your side”
   const [humanColor, setHumanColor] = useState<PlayerColor>("w");
   const [colorChoice, setColorChoice] = useState<"white" | "black" | "random">("white");
-
-  // Orientation of the board (what user sees at bottom)
   const [orientation, setOrientation] = useState<"white" | "black">("white");
 
   // Selection + highlights
   const [selected, setSelected] = useState<Square | null>(null);
   const [legalToSquares, setLegalToSquares] = useState<Set<Square>>(new Set());
 
+  // Scoreboard (session-local)
+  const [score, setScore] = useState({ white: 0, black: 0, draws: 0 });
+
   const fen = useMemo(() => game.fen(), [game]);
 
+  function clearSelection() {
+    setSelected(null);
+    setLegalToSquares(new Set());
+  }
+
+  function computeLegalTargets(from: Square, g: Chess) {
+    // chess.js only returns legal moves (including "must respond to check" rule)
+    const moves = g.moves({ square: from, verbose: true }) as Move[];
+    return new Set(moves.map((m) => m.to as Square));
+  }
+
+  // Safe mutate: never throw out of handlers
   function safeGameMutate(fn: (g: Chess) => boolean | void): boolean {
     let ok = false;
 
@@ -114,39 +135,44 @@ export default function Home() {
     return ok;
   }
 
-  function clearSelection() {
-    setSelected(null);
-    setLegalToSquares(new Set());
+  function isGameOverNow() {
+    const g = new Chess(game.fen());
+    return g.isGameOver();
   }
 
-  function computeLegalTargets(from: Square, g: Chess) {
-    const moves = g.moves({ square: from, verbose: true }) as Move[];
-    return new Set(moves.map((m) => m.to as Square));
-  }
+  function newGame() {
+    const g = new Chess();
 
-  function isHumanTurn(g: Chess) {
-    // In friend mode, both are human (local). In cpu mode, only humanColor is controlled by user.
-    if (mode === "friend") return true;
-    return g.turn() === humanColor;
+    let hc: PlayerColor = "w";
+    if (colorChoice === "white") hc = "w";
+    if (colorChoice === "black") hc = "b";
+    if (colorChoice === "random") hc = Math.random() < 0.5 ? "w" : "b";
+
+    setHumanColor(hc);
+    setOrientation(hc === "w" ? "white" : "black");
+    setGame(g);
+    clearSelection();
   }
 
   function tryMove(from: Square, to: Square) {
-  return safeGameMutate((g) => {
-    const piece = g.get(from);
-    if (!piece) return false;
+    return safeGameMutate((g) => {
+      if (g.isGameOver()) return false;
 
-    // must be correct turn
-    if (piece.color !== g.turn()) return false;
+      const piece = g.get(from);
+      if (!piece) return false;
 
-    // in cpu mode, only allow human to move
-    if (mode === "cpu" && g.turn() !== humanColor) return false;
+      // Enforce turn
+      if (piece.color !== g.turn()) return false;
 
-    const move = g.move({ from, to, promotion: "q" });
-    return !!move;
-  });
-}
+      // In CPU mode, user can only move their color
+      if (mode === "cpu" && g.turn() !== humanColor) return false;
 
-  // Drag-drop support
+      // This will fail if illegal OR if it doesn't resolve check when in check
+      const move = g.move({ from, to, promotion: "q" });
+      return !!move;
+    });
+  }
+
   function onDrop(sourceSquare: string, targetSquare: string) {
     try {
       const ok = tryMove(sourceSquare as Square, targetSquare as Square);
@@ -158,29 +184,36 @@ export default function Home() {
     }
   }
 
-  // Click-to-highlight + click-to-move
   function onPieceClick(_piece: string, square: string) {
     try {
       const sq = square as Square;
       const g = new Chess(game.fen());
+
+      if (g.isGameOver()) {
+        clearSelection();
+        return;
+      }
+
       const p = g.get(sq);
       if (!p) {
         clearSelection();
         return;
       }
 
+      // Only select pieces of the side to move
       if (p.color !== g.turn()) {
         clearSelection();
         return;
       }
 
+      // In CPU mode, only select your pieces on your turn
       if (mode === "cpu" && g.turn() !== humanColor) {
         clearSelection();
         return;
       }
 
       setSelected(sq);
-      setLegalToSquares(computeLegalTargets(sq, g));
+      setLegalToSquares(computeLegalTargets(sq, g)); // legal moves only (respects check rule)
     } catch {
       clearSelection();
     }
@@ -225,40 +258,68 @@ export default function Home() {
     return styles;
   }, [selected, legalToSquares]);
 
-  // Start / reset game with settings
-  function newGame() {
-    const g = new Chess();
+  const turnText = useMemo(() => (game.turn() === "w" ? "White" : "Black"), [game]);
 
-    // Decide humanColor based on choice
-    let hc: PlayerColor = "w";
-    if (colorChoice === "white") hc = "w";
-    if (colorChoice === "black") hc = "b";
-    if (colorChoice === "random") hc = Math.random() < 0.5 ? "w" : "b";
+  const statusText = useMemo(() => {
+    const g = new Chess(game.fen());
+    return statusLabel(g);
+  }, [game]);
 
-    setHumanColor(hc);
-    setOrientation(hc === "w" ? "white" : "black");
-    setGame(g);
-    clearSelection();
-  }
+  const winnerText = useMemo(() => {
+    const g = new Chess(game.fen());
+    return winnerLabelIfAny(g); // "White" | "Black" | null
+  }, [game]);
+
+  // Score update when game ends (checkmate/draw/stalemate)
+  useEffect(() => {
+    const g = new Chess(game.fen());
+    if (!g.isGameOver()) return;
+
+    // Only count once per terminal position:
+    // We'll mark by fen + a ref-like state in memory using sessionStorage-ish approach.
+    // Simple approach: store last counted terminal fen in a global var (state)
+  }, [game]);
+
+  // We’ll do a simple in-state “lastCountedFen” to avoid double-counting
+  const [lastCountedFen, setLastCountedFen] = useState<string>("");
+
+  useEffect(() => {
+    const g = new Chess(game.fen());
+    if (!g.isGameOver()) return;
+
+    const terminalFen = g.fen();
+    if (terminalFen === lastCountedFen) return;
+
+    const winner = winnerLabelIfAny(g);
+    if (winner === "White") setScore((s) => ({ ...s, white: s.white + 1 }));
+    else if (winner === "Black") setScore((s) => ({ ...s, black: s.black + 1 }));
+    else setScore((s) => ({ ...s, draws: s.draws + 1 }));
+
+    setLastCountedFen(terminalFen);
+  }, [game, lastCountedFen]);
 
   // CPU auto-move when it’s CPU’s turn
   useEffect(() => {
     if (mode !== "cpu") return;
 
     const g = new Chess(game.fen());
-    const cpuTurn = g.turn() !== humanColor;
-
-    if (!cpuTurn) return;
     if (g.isGameOver()) return;
+
+    const cpuTurn = g.turn() !== humanColor;
+    if (!cpuTurn) return;
 
     const t = setTimeout(() => {
       try {
         const g2 = new Chess(game.fen());
+        if (g2.isGameOver()) return;
+
         const move = chooseCpuMove(g2, difficulty);
         if (!move) return;
 
         safeGameMutate((mut) => {
+          if (mut.isGameOver()) return false;
           mut.move(move);
+          return true;
         });
         clearSelection();
       } catch {
@@ -269,32 +330,23 @@ export default function Home() {
     return () => clearTimeout(t);
   }, [game, mode, humanColor, difficulty]);
 
-  // If user switches mode/settings, we usually want a clean reset
+  // Reset game when switching mode (keeps things predictable)
   useEffect(() => {
     newGame();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  const statusText = useMemo(() => {
-    const g = new Chess(game.fen());
-    if (g.isCheckmate()) return "Checkmate";
-    if (g.isStalemate()) return "Stalemate";
-    if (g.isDraw()) return "Draw";
-    if (g.isCheck()) return "Check";
-    return "In play";
-  }, [game]);
-
-  const turnText = useMemo(() => (game.turn() === "w" ? "White" : "Black"), [game]);
+  const gameOver = isGameOverNow();
 
   return (
-    <main className="min-h-screen bg-black text-white p-6 flex items-center justify-center">
-      <div className="w-full max-w-md space-y-4">
+    <main className="min-h-screen bg-black text-white px-4 pt-3 pb-6 overflow-y-auto">
+      <div className="w-full max-w-md mx-auto space-y-3">
         {/* Header */}
         <div className="flex items-start justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold">PaperLink Play</h1>
             <p className="text-white/60 text-sm">Chess MVP</p>
-            <p className="text-xs text-white/30">build: chessboard-v2</p>
+            <p className="text-xs text-white/30">build: chessboard-v3</p>
           </div>
 
           <button
@@ -305,8 +357,15 @@ export default function Home() {
           </button>
         </div>
 
+        {/* Scoreboard */}
+        <div className="rounded-2xl border border-white/10 p-3 text-sm text-white/75 flex items-center justify-between">
+          <div>White: <span className="text-white">{score.white}</span></div>
+          <div>Draws: <span className="text-white">{score.draws}</span></div>
+          <div>Black: <span className="text-white">{score.black}</span></div>
+        </div>
+
         {/* Controls */}
-        <div className="rounded-2xl border border-white/10 p-4 space-y-3">
+        <div className="rounded-2xl border border-white/10 p-3 space-y-2">
           <div className="flex gap-2">
             <button
               onClick={() => setMode("cpu")}
@@ -319,9 +378,7 @@ export default function Home() {
             <button
               onClick={() => setMode("friend")}
               className={`flex-1 rounded-xl px-3 py-2 text-sm border ${
-                mode === "friend"
-                  ? "bg-white text-black border-white"
-                  : "border-white/15 text-white/80"
+                mode === "friend" ? "bg-white text-black border-white" : "border-white/15 text-white/80"
               }`}
               title="Local pass-and-play for now. Online friend play comes next."
             >
@@ -359,9 +416,41 @@ export default function Home() {
           </div>
 
           <p className="text-xs text-white/40">
-            Tip: tap a piece to highlight legal moves, then tap a square to move.
+            Tip: tap a piece to see legal moves. If you’re in <b>Check</b>, only moves that cancel the check are allowed.
           </p>
         </div>
+
+        {/* Turn + Status banner */}
+        <div className="rounded-2xl border border-white/10 p-3 text-sm flex items-center justify-between">
+          <div className="text-white/70">
+            <span className="text-white/50">Turn:</span> {turnText}
+          </div>
+
+          <div
+            className={[
+              "text-sm font-medium",
+              statusText === "Checkmate" ? "text-red-300" : "",
+              statusText === "Check" ? "text-yellow-200" : "",
+            ].join(" ")}
+          >
+            {statusText}
+          </div>
+        </div>
+
+        {/* Winner banner */}
+        {gameOver && (
+          <div className="rounded-2xl border border-white/10 p-3 text-sm">
+            {winnerText ? (
+              <div className="text-white">
+                ✅ Game over — <span className="font-semibold">{winnerText}</span> wins.
+              </div>
+            ) : (
+              <div className="text-white">
+                ✅ Game over — <span className="font-semibold">Draw</span>.
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Board */}
         <div className="rounded-2xl overflow-hidden border border-white/10">
@@ -375,21 +464,10 @@ export default function Home() {
           />
         </div>
 
-        {/* Status */}
-        <div className="rounded-2xl border border-white/10 p-4 text-sm text-white/70 space-y-1">
-          <div>
-            <span className="text-white/50">Turn:</span> {turnText}
-          </div>
-          <div>
-            <span className="text-white/50">Status:</span> {statusText}
-          </div>
-          <div>
-            <span className="text-white/50">Mode:</span>{" "}
-            {mode === "cpu" ? `CPU (${difficulty})` : "Friend (local pass-and-play)"}
-          </div>
-          <div className="text-xs text-white/40 pt-2">
-            Next: online friend play + game links + matchmaking.
-          </div>
+        {/* Footer info */}
+        <div className="rounded-2xl border border-white/10 p-3 text-xs text-white/50">
+          Mode: {mode === "cpu" ? `CPU (${difficulty})` : "Friend (local pass-and-play)"} ·{" "}
+          {mode === "cpu" ? `You: ${humanColor === "w" ? "White" : "Black"}` : "Online friend play: next"}
         </div>
       </div>
     </main>
