@@ -70,7 +70,7 @@ export default function Home() {
               ? "Check"
               : "In play"}
           </div>
-          <div className="text-xs text-white/40 pt-2">
+          <div className="text-xs text-white/30">build: chessboard-v1</div>
             Next: create a real game + invite a friend.
           </div>
         </div>
