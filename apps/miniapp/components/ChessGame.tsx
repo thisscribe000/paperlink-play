@@ -15,8 +15,9 @@ type PendingPromotion = {
   color: Color;
 };
 
+type LastMove = { from: Square; to: Square } | null;
+
 function isSquare(v: string): v is Square {
-  // a1..h8
   return /^[a-h][1-8]$/.test(v);
 }
 
@@ -91,11 +92,32 @@ function pickCpuMove(chess: Chess, difficulty: Difficulty): Move | null {
   return best ?? moves[0];
 }
 
+function findKingSquare(chess: Chess, color: Color): Square | null {
+  const board = chess.board();
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const p = board[r][c];
+      if (!p) continue;
+      if (p.type === "k" && p.color === color) {
+        const file = "abcdefgh"[c];
+        const rank = String(8 - r);
+        const sq = `${file}${rank}`;
+        return isSquare(sq) ? (sq as Square) : null;
+      }
+    }
+  }
+  return null;
+}
+
 export default function ChessGame() {
   const chessRef = useRef(new Chess());
   const chess = chessRef.current;
 
+  const cpuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [fen, setFen] = useState(chess.fen());
+  const [fenHistory, setFenHistory] = useState<string[]>([chess.fen()]);
+
   const [mode, setMode] = useState<Mode>("cpu");
   const [difficulty, setDifficulty] = useState<Difficulty>("easy");
   const [playerColor, setPlayerColor] = useState<Color>("w");
@@ -115,6 +137,7 @@ export default function ChessGame() {
   );
 
   const [pendingPromotion, setPendingPromotion] = useState<PendingPromotion | null>(null);
+  const [lastMove, setLastMove] = useState<LastMove>(null);
 
   const turn = chess.turn() as Color;
 
@@ -123,19 +146,22 @@ export default function ChessGame() {
     return turn === playerColor;
   }, [mode, turn, playerColor]);
 
-  function refreshUI() {
+  function cancelCpuTimer() {
+    if (cpuTimerRef.current) {
+      clearTimeout(cpuTimerRef.current);
+      cpuTimerRef.current = null;
+    }
+  }
+
+  function refreshUI(nextStatusText?: string) {
     setFen(chess.fen());
 
-    const t = chess.turn() === "w" ? "White" : "Black";
-    setTurnText(t);
+    setTurnText(chess.turn() === "w" ? "White" : "Black");
 
     const check = chess.inCheck();
     setInCheck(check);
 
-    const over = chess.isGameOver();
-    if (!over) {
-      setGameOverText("");
-    } else {
+    if (chess.isGameOver()) {
       if (chess.isCheckmate()) {
         const winner = chess.turn() === "w" ? "Black" : "White";
         setGameOverText(`Game over — Checkmate. ${winner} wins.`);
@@ -150,9 +176,16 @@ export default function ChessGame() {
       } else {
         setGameOverText("Game over.");
       }
+    } else {
+      setGameOverText("");
     }
 
-    if (over) setStatusText(gameOverText || "Game over.");
+    if (nextStatusText !== undefined) {
+      setStatusText(nextStatusText);
+      return;
+    }
+
+    if (chess.isGameOver()) setStatusText("");
     else if (check) setStatusText("Check!");
     else setStatusText("");
   }
@@ -192,13 +225,28 @@ export default function ChessGame() {
     return moves.some((m) => m.from === from && m.to === to && m.promotion);
   }
 
+  function pushHistoryCurrentFen() {
+    const current = chess.fen();
+    setFenHistory((h) => {
+      // avoid duplicate push if same fen
+      if (h[h.length - 1] === current) return h;
+      return [...h, current];
+    });
+  }
+
   function applyMove(from: Square, to: Square, promotion?: "q" | "r" | "b" | "n"): boolean {
     try {
-      const move = chess.move({ from, to, promotion } as any);
+      const move = chess.move({ from, to, promotion } as any) as any;
       if (!move) return false;
-      refreshUI();
+
+      pushHistoryCurrentFen();
+      setLastMove({ from, to });
+      refreshUI("");
+
       return true;
     } catch {
+      // show brief error without crashing page
+      refreshUI("Illegal move.");
       return false;
     }
   }
@@ -207,23 +255,35 @@ export default function ChessGame() {
   useEffect(() => {
     if (mode !== "cpu") return;
     if (chess.isGameOver()) return;
+    if (pendingPromotion) return;
 
+    // CPU plays when it's NOT player's turn
     if (turn !== playerColor) {
-      const timer = setTimeout(() => {
+      cancelCpuTimer();
+
+      cpuTimerRef.current = setTimeout(() => {
         const move = pickCpuMove(chess, difficulty);
         if (!move) return;
-        chess.move(move as any);
-        clearSelection();
-        refreshUI();
-      }, 350);
 
-      return () => clearTimeout(timer);
+        const m = chess.move(move as any) as any;
+        if (!m) return;
+
+        pushHistoryCurrentFen();
+        const from = (m.from as string) || (move as any).from;
+        const to = (m.to as string) || (move as any).to;
+        if (isSquare(from) && isSquare(to)) setLastMove({ from, to });
+
+        clearSelection();
+        refreshUI("");
+      }, 350);
     }
-  }, [fen, mode, playerColor, difficulty, turn]);
+
+    return () => cancelCpuTimer();
+  }, [fen, mode, playerColor, difficulty, turn, pendingPromotion]);
 
   // initial
   useEffect(() => {
-    refreshUI();
+    refreshUI("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -242,9 +302,14 @@ export default function ChessGame() {
   }, [fen]);
 
   function newGame() {
+    cancelCpuTimer();
     chess.reset();
     clearSelection();
-    refreshUI();
+    setPendingPromotion(null);
+    setLastMove(null);
+    const startFen = chess.fen();
+    setFenHistory([startFen]);
+    refreshUI("");
   }
 
   function canMovePiece(piece: string): boolean {
@@ -257,6 +322,37 @@ export default function ChessGame() {
 
     // CPU mode: only your pieces, and only on your turn
     return isPlayerTurn && color === playerColor;
+  }
+
+  function undoCpuFullTurn() {
+    // CPU mode only:
+    // If CPU already moved and it's your turn, undo 2 half-moves.
+    // If you moved but CPU hasn't replied yet (rare), undo 1.
+    cancelCpuTimer();
+    clearSelection();
+    setPendingPromotion(null);
+
+    setFenHistory((h) => {
+      if (h.length <= 1) return h;
+
+      const isYourTurnNow = chess.turn() === playerColor;
+
+      // If it's your turn and we have at least 3 states: undo 2 plies (full turn)
+      if (isYourTurnNow && h.length >= 3) {
+        const targetFen = h[h.length - 3];
+        chess.load(targetFen);
+        setLastMove(null);
+        refreshUI("");
+        return h.slice(0, h.length - 2);
+      }
+
+      // Otherwise undo 1 ply
+      const targetFen = h[h.length - 2];
+      chess.load(targetFen);
+      setLastMove(null);
+      refreshUI("");
+      return h.slice(0, h.length - 1);
+    });
   }
 
   function onSquareClick(squareStr: string) {
@@ -302,12 +398,14 @@ export default function ChessGame() {
 
     if (isPromotionMove(selectedSquare, square)) {
       setPendingPromotion({ from: selectedSquare, to: square, color: chess.turn() as Color });
+      refreshUI("Pick promotion piece…");
       return;
     }
 
     const ok = applyMove(selectedSquare, square);
     clearSelection();
-    if (!ok) refreshUI();
+
+    if (!ok) refreshUI("Illegal move.");
   }
 
   function onPieceDrop(sourceSquareStr: string, targetSquareStr: string, piece: string) {
@@ -328,12 +426,15 @@ export default function ChessGame() {
 
     if (isPromotionMove(sourceSquare, targetSquare)) {
       setPendingPromotion({ from: sourceSquare, to: targetSquare, color: chess.turn() as Color });
+      refreshUI("Pick promotion piece…");
       return false; // snapback until they pick
     }
 
     const ok = applyMove(sourceSquare, targetSquare);
     clearSelection();
-    return ok; // false => snapback (what you want)
+
+    // return false => snapback (your preference)
+    return ok;
   }
 
   function choosePromotion(p: "q" | "r" | "b" | "n") {
@@ -343,10 +444,53 @@ export default function ChessGame() {
     const ok = applyMove(from, to, p);
     setPendingPromotion(null);
     clearSelection();
-    if (!ok) refreshUI();
+
+    if (!ok) refreshUI("Illegal move.");
   }
 
+  // Styles: last move, selected/legal moves, check king
+  const lastMoveStyles = useMemo(() => {
+    if (!lastMove) return {};
+    return {
+      [lastMove.from]: {
+        background: "rgba(255, 215, 0, 0.20)",
+        boxShadow: "inset 0 0 0 3px rgba(255, 215, 0, 0.35)",
+      },
+      [lastMove.to]: {
+        background: "rgba(255, 215, 0, 0.28)",
+        boxShadow: "inset 0 0 0 3px rgba(255, 215, 0, 0.45)",
+      },
+    } as Record<string, React.CSSProperties>;
+  }, [lastMove]);
+
+  const checkKingStyles = useMemo(() => {
+    if (!inCheck || chess.isGameOver()) return {};
+    const kingSq = findKingSquare(chess, chess.turn() as Color);
+    if (!kingSq) return {};
+    return {
+      [kingSq]: {
+        boxShadow: "inset 0 0 0 4px rgba(255, 0, 0, 0.65)",
+      },
+    } as Record<string, React.CSSProperties>;
+  }, [inCheck, fen]);
+
+  const mergedSquareStyles = useMemo(() => {
+    // order matters: last move -> highlights -> king check (king should be most visible)
+    return {
+      ...lastMoveStyles,
+      ...highlightSquares,
+      ...checkKingStyles,
+    };
+  }, [lastMoveStyles, highlightSquares, checkKingStyles]);
+
   const boardOrientation = mode === "cpu" ? (playerColor === "w" ? "white" : "black") : "white";
+
+  const canUndoCpu = useMemo(() => {
+    if (mode !== "cpu") return false;
+    if (chess.isGameOver()) return false;
+    // allow undo if there is at least one move
+    return fenHistory.length >= 2;
+  }, [mode, fenHistory.length, fen]);
 
   return (
     <div
@@ -362,8 +506,8 @@ export default function ChessGame() {
     >
       <div style={{ maxWidth: 520, margin: "0 auto", display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 14, background: "rgba(255,255,255,0.04)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
               <button
                 onClick={() => {
                   setMode("cpu");
@@ -399,6 +543,25 @@ export default function ChessGame() {
               >
                 vs Friend (offline)
               </button>
+
+              {mode === "cpu" && (
+                <button
+                  onClick={() => undoCpuFullTurn()}
+                  disabled={!canUndoCpu}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 999,
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    background: canUndoCpu ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.03)",
+                    color: "white",
+                    cursor: canUndoCpu ? "pointer" : "not-allowed",
+                    fontWeight: 700,
+                    opacity: canUndoCpu ? 1 : 0.55,
+                  }}
+                >
+                  Undo (CPU)
+                </button>
+              )}
             </div>
 
             <button
@@ -468,7 +631,7 @@ export default function ChessGame() {
           </div>
 
           <div style={{ marginTop: 10, opacity: 0.7, fontSize: 12, lineHeight: 1.35 }}>
-            Tap a piece/square to highlight legal moves, then tap a highlighted square to move. Drag also works. Illegal drops snap back.
+            Tap a piece to highlight legal moves. Drag-drop illegal moves snap back. Last move is highlighted.
           </div>
 
           <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
@@ -503,7 +666,7 @@ export default function ChessGame() {
             {gameOverText}
           </div>
         ) : statusText ? (
-          <div style={{ border: "1px solid rgba(255,0,0,0.35)", borderRadius: 16, padding: 12, background: "rgba(255,0,0,0.10)", fontWeight: 700 }}>
+          <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 12, background: "rgba(255,255,255,0.04)", fontWeight: 700 }}>
             {statusText}
           </div>
         ) : null}
@@ -515,7 +678,7 @@ export default function ChessGame() {
             onSquareClick={onSquareClick}
             boardOrientation={boardOrientation}
             arePiecesDraggable={!pendingPromotion && !chess.isGameOver()}
-            customSquareStyles={highlightSquares}
+            customSquareStyles={mergedSquareStyles}
             customBoardStyle={{ borderRadius: 18, overflow: "hidden" }}
           />
         </div>
@@ -542,6 +705,7 @@ export default function ChessGame() {
               onClick={() => {
                 setPendingPromotion(null);
                 clearSelection();
+                refreshUI("");
               }}
               style={{ marginTop: 12, width: "100%", padding: "12px 14px", borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: "white", cursor: "pointer", fontWeight: 700 }}
             >
