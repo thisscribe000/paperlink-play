@@ -29,6 +29,21 @@ type Snapshot = {
   statusText: string;
 };
 
+type SavedStateV1 = {
+  v: 1;
+  fen: string;
+  mode: Mode;
+  difficulty: Difficulty;
+  playerColor: Color;
+  timeControl: TimeControl;
+  wTimeMs: number;
+  bTimeMs: number;
+  lastMove: LastMove;
+  scores: { w: number; b: number; d: number };
+};
+
+const STORAGE_KEY = "paperlink_play_chess_v1";
+
 function isSquare(v: string): v is Square {
   return /^[a-h][1-8]$/.test(v);
 }
@@ -154,7 +169,6 @@ function pieceLabel(type: string) {
 }
 
 function capturedFromFen(startFen: string, currentFen: string) {
-  // Count pieces in start vs current to derive captures
   const countPieces = (fen: string) => {
     const placement = fen.split(" ")[0];
     const counts: Record<string, number> = {};
@@ -168,14 +182,11 @@ function capturedFromFen(startFen: string, currentFen: string) {
   const start = countPieces(startFen);
   const cur = countPieces(currentFen);
 
-  // Standard initial counts
-  // White: P8 N2 B2 R2 Q1 K1 = uppercase
-  // Black: p8 n2 b2 r2 q1 k1 = lowercase
-  const all = ["P","N","B","R","Q","K","p","n","b","r","q","k"];
+  const all = ["P", "N", "B", "R", "Q", "K", "p", "n", "b", "r", "q", "k"];
 
   const captured: { whiteCaptured: string[]; blackCaptured: string[] } = {
-    whiteCaptured: [], // pieces white captured from black (so black pieces missing)
-    blackCaptured: [], // pieces black captured from white (so white pieces missing)
+    whiteCaptured: [],
+    blackCaptured: [],
   };
 
   for (const piece of all) {
@@ -185,9 +196,8 @@ function capturedFromFen(startFen: string, currentFen: string) {
     if (missing <= 0) continue;
 
     const isWhitePiece = piece === piece.toUpperCase();
-    const label = pieceLabel(piece.toLowerCase()); // show by type
+    const label = pieceLabel(piece.toLowerCase());
 
-    // if a white piece is missing => black captured it
     if (isWhitePiece) {
       for (let i = 0; i < missing; i++) captured.blackCaptured.push(label);
     } else {
@@ -196,6 +206,15 @@ function capturedFromFen(startFen: string, currentFen: string) {
   }
 
   return captured;
+}
+
+function safeJsonParse<T>(s: string | null): T | null {
+  if (!s) return null;
+  try {
+    return JSON.parse(s) as T;
+  } catch {
+    return null;
+  }
 }
 
 export default function ChessGame() {
@@ -224,23 +243,18 @@ export default function ChessGame() {
   const [scoreDraw, setScoreDraw] = useState(0);
 
   const [selectedSquare, setSelectedSquare] = useState<Square | null>(null);
-  const [highlightSquares, setHighlightSquares] = useState<Record<string, React.CSSProperties>>(
-    {}
-  );
+  const [highlightSquares, setHighlightSquares] = useState<Record<string, React.CSSProperties>>({});
 
   const [pendingPromotion, setPendingPromotion] = useState<PendingPromotion | null>(null);
   const [lastMove, setLastMove] = useState<LastMove>(null);
 
-  // Timer system
   const [timeControl, setTimeControl] = useState<TimeControl>("open");
   const [wTimeMs, setWTimeMs] = useState<number>(initialTimeMs("open"));
   const [bTimeMs, setBTimeMs] = useState<number>(initialTimeMs("open"));
   const [clockRunning, setClockRunning] = useState(false);
 
-  // Move history
   const [pgnMoves, setPgnMoves] = useState<string[]>([]);
 
-  // History snapshots for undo
   const [history, setHistory] = useState<Snapshot[]>(() => {
     const start: Snapshot = {
       fen: chess.fen(),
@@ -253,6 +267,12 @@ export default function ChessGame() {
     };
     return [start];
   });
+
+  // Friend draw offer state
+  const [drawOffer, setDrawOffer] = useState<null | "pending">(null);
+
+  // Share feedback
+  const [shareToast, setShareToast] = useState<string>("");
 
   const turn = chess.turn() as Color;
 
@@ -319,6 +339,30 @@ export default function ChessGame() {
     }, 200);
 
     setClockRunning(true);
+  }
+
+  function updatePgnMoves() {
+    const pgn = chess.pgn();
+    const moveText = pgn
+      .split("\n")
+      .filter((l) => l.trim() && !l.startsWith("["))
+      .join(" ")
+      .trim();
+
+    if (!moveText) {
+      setPgnMoves([]);
+      return;
+    }
+
+    const tokens = moveText.split(/\s+/).filter(Boolean);
+    const moves: string[] = [];
+    for (const t of tokens) {
+      if (/^\d+\.+$/.test(t) || /^\d+\.(\.\.)?$/.test(t) || /^\d+\.\.\.$/.test(t)) continue;
+      // strip possible result token like 1-0, 0-1, 1/2-1/2
+      if (t === "1-0" || t === "0-1" || t === "1/2-1/2") continue;
+      moves.push(t);
+    }
+    setPgnMoves(moves);
   }
 
   function refreshUI(nextStatusText?: string) {
@@ -408,37 +452,18 @@ export default function ChessGame() {
     };
     setHistory((h) => {
       const prev = h[h.length - 1];
-      if (prev && prev.fen === snap.fen && prev.wTimeMs === snap.wTimeMs && prev.bTimeMs === snap.bTimeMs) {
+      if (
+        prev &&
+        prev.fen === snap.fen &&
+        prev.wTimeMs === snap.wTimeMs &&
+        prev.bTimeMs === snap.bTimeMs &&
+        prev.gameOverText === snap.gameOverText &&
+        prev.statusText === snap.statusText
+      ) {
         return h;
       }
       return [...h, snap];
     });
-  }
-
-  function updatePgnMoves() {
-    // chess.pgn() returns full PGN text; we only want SAN moves list
-    const pgn = chess.pgn();
-    // Strip headers; keep move text portion
-    const moveText = pgn
-      .split("\n")
-      .filter((l) => l.trim() && !l.startsWith("["))
-      .join(" ")
-      .trim();
-
-    if (!moveText) {
-      setPgnMoves([]);
-      return;
-    }
-
-    // moveText example: "1. e4 e5 2. Nf3 Nc6 ..."
-    const tokens = moveText.split(/\s+/).filter(Boolean);
-    const moves: string[] = [];
-    for (const t of tokens) {
-      // skip move numbers like "1." or "23..."
-      if (/^\d+\.+$/.test(t) || /^\d+\.(\.\.)?$/.test(t) || /^\d+\.\.\.$/.test(t)) continue;
-      moves.push(t);
-    }
-    setPgnMoves(moves);
   }
 
   function applyMove(from: Square, to: Square, promotion?: "q" | "r" | "b" | "n"): boolean {
@@ -446,13 +471,14 @@ export default function ChessGame() {
       const move = chess.move({ from, to, promotion } as any) as any;
       if (!move) return false;
 
+      // any move cancels pending draw offer
+      if (drawOffer) setDrawOffer(null);
+
       startClockIfNeeded();
 
       setLastMove({ from, to });
-      setStatusText("");
       refreshUI("");
 
-      // After move commit, update move list + snapshot
       setTimeout(() => {
         updatePgnMoves();
         pushSnapshot();
@@ -481,6 +507,9 @@ export default function ChessGame() {
         const m = chess.move(move as any) as any;
         if (!m) return;
 
+        // cpu move cancels any draw offer too
+        if (drawOffer) setDrawOffer(null);
+
         startClockIfNeeded();
 
         const from = (m.from as string) || (move as any).from;
@@ -498,13 +527,70 @@ export default function ChessGame() {
     }
 
     return () => cancelCpuTimer();
-  }, [fen, mode, playerColor, difficulty, turn, pendingPromotion, gameOverText]);
+  }, [fen, mode, playerColor, difficulty, turn, pendingPromotion, gameOverText, drawOffer]);
 
+  // restore saved state on first load
   useEffect(() => {
-    refreshUI("");
-    updatePgnMoves();
+    const saved = safeJsonParse<SavedStateV1>(localStorage.getItem(STORAGE_KEY));
+    if (!saved || saved.v !== 1) {
+      refreshUI("");
+      updatePgnMoves();
+      return;
+    }
+
+    try {
+      chess.load(saved.fen);
+      startFenRef.current = new Chess().fen();
+
+      setMode(saved.mode);
+      setDifficulty(saved.difficulty);
+      setPlayerColor(saved.playerColor);
+
+      setTimeControl(saved.timeControl);
+      setWTimeMs(saved.wTimeMs);
+      setBTimeMs(saved.bTimeMs);
+
+      setLastMove(saved.lastMove);
+
+      setScoreWhite(saved.scores.w);
+      setScoreBlack(saved.scores.b);
+      setScoreDraw(saved.scores.d);
+
+      setFen(chess.fen());
+      setTurnText(chess.turn() === "w" ? "White" : "Black");
+      setInCheck(chess.inCheck());
+
+      setTimeout(() => {
+        updatePgnMoves();
+        pushSnapshot();
+      }, 0);
+
+      refreshUI("");
+    } catch {
+      refreshUI("");
+      updatePgnMoves();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // persist on change
+  useEffect(() => {
+    const payload: SavedStateV1 = {
+      v: 1,
+      fen,
+      mode,
+      difficulty,
+      playerColor,
+      timeControl,
+      wTimeMs,
+      bTimeMs,
+      lastMove,
+      scores: { w: scoreWhite, b: scoreBlack, d: scoreDraw },
+    };
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    } catch {}
+  }, [fen, mode, difficulty, playerColor, timeControl, wTimeMs, bTimeMs, lastMove, scoreWhite, scoreBlack, scoreDraw]);
 
   // score update once game ends
   useEffect(() => {
@@ -532,6 +618,7 @@ export default function ChessGame() {
     setLastMove(null);
     setStatusText("");
     setGameOverText("");
+    setDrawOffer(null);
 
     const init = initialTimeMs(timeControl);
     setWTimeMs(init);
@@ -592,6 +679,7 @@ export default function ChessGame() {
     setPendingPromotion(null);
     setStatusText("");
     setGameOverText("");
+    setDrawOffer(null);
 
     setHistory((h) => {
       if (h.length <= 1) return h;
@@ -630,6 +718,50 @@ export default function ChessGame() {
 
     setGameOverText(`Game over — ${loser} resigned. ${winner} wins.`);
     setStatusText("");
+    setDrawOffer(null);
+  }
+
+  function offerDraw() {
+    if (mode !== "friend") return;
+    if (chess.isGameOver() || gameOverText) return;
+    if (drawOffer) return;
+    setDrawOffer("pending");
+    setStatusText("Draw offered. Waiting for response…");
+  }
+
+  function acceptDraw() {
+    stopClock();
+    setGameOverText("Game over — Draw (agreed).");
+    setStatusText("");
+    setDrawOffer(null);
+  }
+
+  function declineDraw() {
+    setDrawOffer(null);
+    setStatusText("");
+  }
+
+  function shareChallenge() {
+    const url = typeof window !== "undefined" ? window.location.origin : "";
+    const shareText =
+      `PaperLink Play Chess\n` +
+      `Mode: ${mode === "cpu" ? `CPU (${difficulty})` : "Friend (offline)"}\n` +
+      `Open: ${url}\n` +
+      `Try the bot: @paperlinkplay_bot`;
+
+    const done = (msg: string) => {
+      setShareToast(msg);
+      setTimeout(() => setShareToast(""), 1800);
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard
+        .writeText(shareText)
+        .then(() => done("Copied. Paste in Telegram."))
+        .catch(() => done("Copy failed. Long-press to copy text."));
+    } else {
+      done("Copy not available on this device.");
+    }
   }
 
   function onSquareClick(squareStr: string) {
@@ -813,6 +945,21 @@ export default function ChessGame() {
               </button>
 
               <button
+                onClick={() => shareChallenge()}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.08)",
+                  color: "white",
+                  cursor: "pointer",
+                  fontWeight: 900,
+                }}
+              >
+                Share
+              </button>
+
+              <button
                 onClick={() => resign()}
                 disabled={Boolean(gameOverText) || chess.isGameOver()}
                 style={{
@@ -845,6 +992,12 @@ export default function ChessGame() {
               New game
             </button>
           </div>
+
+          {shareToast ? (
+            <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)", fontWeight: 900 }}>
+              {shareToast}
+            </div>
+          ) : null}
 
           {/* Undo row */}
           {mode === "cpu" && (
@@ -959,7 +1112,26 @@ export default function ChessGame() {
               <div style={{ fontWeight: 900, fontSize: 16 }}>{turnText}</div>
             </div>
 
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              {mode === "friend" && !gameOverText && !chess.isGameOver() && (
+                <button
+                  onClick={() => offerDraw()}
+                  disabled={Boolean(drawOffer)}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 999,
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    background: Boolean(drawOffer) ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.08)",
+                    color: "white",
+                    cursor: Boolean(drawOffer) ? "not-allowed" : "pointer",
+                    fontWeight: 900,
+                    opacity: Boolean(drawOffer) ? 0.6 : 1,
+                  }}
+                >
+                  Offer draw
+                </button>
+              )}
+
               {inCheck && !chess.isGameOver() && !gameOverText && (
                 <div style={{ padding: "10px 14px", borderRadius: 999, background: "rgba(255,0,0,0.25)", border: "1px solid rgba(255,0,0,0.55)", color: "white", fontWeight: 900 }}>
                   CHECK
@@ -972,6 +1144,19 @@ export default function ChessGame() {
               )}
             </div>
           </div>
+
+          {drawOffer === "pending" && mode === "friend" && !gameOverText && !chess.isGameOver() && (
+            <div style={{ marginTop: 10, padding: 12, borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)" }}>
+              <div style={{ fontWeight: 900 }}>Draw offer</div>
+              <div style={{ opacity: 0.75, fontSize: 12, marginTop: 4 }}>
+                Other player: accept or decline.
+              </div>
+              <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+                <button onClick={() => acceptDraw()} style={pillBtnPrimary}>Accept</button>
+                <button onClick={() => declineDraw()} style={pillBtn}>Decline</button>
+              </div>
+            </div>
+          )}
 
           <div style={{ marginTop: 10, display: "flex", gap: 12, justifyContent: "space-between", flexWrap: "wrap", opacity: 0.9, fontSize: 13 }}>
             <div>White: {scoreWhite}</div>
@@ -1089,4 +1274,22 @@ const promoBtnStyle: React.CSSProperties = {
   color: "white",
   cursor: "pointer",
   fontWeight: 900,
+};
+
+const pillBtn: React.CSSProperties = {
+  flex: 1,
+  padding: "12px 14px",
+  borderRadius: 999,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.06)",
+  color: "white",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const pillBtnPrimary: React.CSSProperties = {
+  ...pillBtn,
+  background: "white",
+  color: "black",
+  border: "1px solid rgba(255,255,255,0.12)",
 };
