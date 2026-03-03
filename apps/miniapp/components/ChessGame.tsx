@@ -22,7 +22,7 @@ type TimeControl = "open" | "blitz" | "rapid";
 type Snapshot = {
   fen: string;
   lastMove: LastMove;
-  wTimeMs: number; // 0 means not used if open
+  wTimeMs: number;
   bTimeMs: number;
   timeControl: TimeControl;
   gameOverText: string;
@@ -131,12 +131,78 @@ function formatMs(ms: number) {
 function initialTimeMs(tc: TimeControl): number {
   if (tc === "open") return 0;
   if (tc === "blitz") return 5 * 60 * 1000;
-  return 10 * 60 * 1000; // rapid
+  return 10 * 60 * 1000;
+}
+
+function pieceLabel(type: string) {
+  switch (type) {
+    case "p":
+      return "P";
+    case "n":
+      return "N";
+    case "b":
+      return "B";
+    case "r":
+      return "R";
+    case "q":
+      return "Q";
+    case "k":
+      return "K";
+    default:
+      return "?";
+  }
+}
+
+function capturedFromFen(startFen: string, currentFen: string) {
+  // Count pieces in start vs current to derive captures
+  const countPieces = (fen: string) => {
+    const placement = fen.split(" ")[0];
+    const counts: Record<string, number> = {};
+    for (const ch of placement) {
+      if (ch === "/" || (ch >= "1" && ch <= "8")) continue;
+      counts[ch] = (counts[ch] ?? 0) + 1;
+    }
+    return counts;
+  };
+
+  const start = countPieces(startFen);
+  const cur = countPieces(currentFen);
+
+  // Standard initial counts
+  // White: P8 N2 B2 R2 Q1 K1 = uppercase
+  // Black: p8 n2 b2 r2 q1 k1 = lowercase
+  const all = ["P","N","B","R","Q","K","p","n","b","r","q","k"];
+
+  const captured: { whiteCaptured: string[]; blackCaptured: string[] } = {
+    whiteCaptured: [], // pieces white captured from black (so black pieces missing)
+    blackCaptured: [], // pieces black captured from white (so white pieces missing)
+  };
+
+  for (const piece of all) {
+    const s = start[piece] ?? 0;
+    const c = cur[piece] ?? 0;
+    const missing = Math.max(0, s - c);
+    if (missing <= 0) continue;
+
+    const isWhitePiece = piece === piece.toUpperCase();
+    const label = pieceLabel(piece.toLowerCase()); // show by type
+
+    // if a white piece is missing => black captured it
+    if (isWhitePiece) {
+      for (let i = 0; i < missing; i++) captured.blackCaptured.push(label);
+    } else {
+      for (let i = 0; i < missing; i++) captured.whiteCaptured.push(label);
+    }
+  }
+
+  return captured;
 }
 
 export default function ChessGame() {
   const chessRef = useRef(new Chess());
   const chess = chessRef.current;
+
+  const startFenRef = useRef<string>(chess.fen());
 
   const cpuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clockIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -171,7 +237,10 @@ export default function ChessGame() {
   const [bTimeMs, setBTimeMs] = useState<number>(initialTimeMs("open"));
   const [clockRunning, setClockRunning] = useState(false);
 
-  // History snapshots for undo (and later for persistence)
+  // Move history
+  const [pgnMoves, setPgnMoves] = useState<string[]>([]);
+
+  // History snapshots for undo
   const [history, setHistory] = useState<Snapshot[]>(() => {
     const start: Snapshot = {
       fen: chess.fen(),
@@ -220,7 +289,6 @@ export default function ChessGame() {
       const delta = now - lastTickRef.current;
       lastTickRef.current = now;
 
-      // Only tick while game is active and not in promotion selection
       if (pendingPromotion) return;
       if (chess.isGameOver()) return;
       if (gameOverText) return;
@@ -231,7 +299,6 @@ export default function ChessGame() {
         setWTimeMs((t) => {
           const next = t - delta;
           if (next <= 0) {
-            // White ran out of time => Black wins
             stopClock();
             setGameOverText("Game over — Time out. Black wins.");
             setStatusText("");
@@ -242,7 +309,6 @@ export default function ChessGame() {
         setBTimeMs((t) => {
           const next = t - delta;
           if (next <= 0) {
-            // Black ran out of time => White wins
             stopClock();
             setGameOverText("Game over — Time out. White wins.");
             setStatusText("");
@@ -280,7 +346,6 @@ export default function ChessGame() {
         setGameOverText("Game over.");
       }
     } else {
-      // keep time-out text if already set
       if (!gameOverText.startsWith("Game over — Time out")) {
         setGameOverText("");
       }
@@ -350,20 +415,48 @@ export default function ChessGame() {
     });
   }
 
+  function updatePgnMoves() {
+    // chess.pgn() returns full PGN text; we only want SAN moves list
+    const pgn = chess.pgn();
+    // Strip headers; keep move text portion
+    const moveText = pgn
+      .split("\n")
+      .filter((l) => l.trim() && !l.startsWith("["))
+      .join(" ")
+      .trim();
+
+    if (!moveText) {
+      setPgnMoves([]);
+      return;
+    }
+
+    // moveText example: "1. e4 e5 2. Nf3 Nc6 ..."
+    const tokens = moveText.split(/\s+/).filter(Boolean);
+    const moves: string[] = [];
+    for (const t of tokens) {
+      // skip move numbers like "1." or "23..."
+      if (/^\d+\.+$/.test(t) || /^\d+\.(\.\.)?$/.test(t) || /^\d+\.\.\.$/.test(t)) continue;
+      moves.push(t);
+    }
+    setPgnMoves(moves);
+  }
+
   function applyMove(from: Square, to: Square, promotion?: "q" | "r" | "b" | "n"): boolean {
     try {
       const move = chess.move({ from, to, promotion } as any) as any;
       if (!move) return false;
 
-      // start clock on first real move
       startClockIfNeeded();
 
       setLastMove({ from, to });
       setStatusText("");
       refreshUI("");
 
-      // snapshot after move (with updated fen)
-      setTimeout(() => pushSnapshot(), 0);
+      // After move commit, update move list + snapshot
+      setTimeout(() => {
+        updatePgnMoves();
+        pushSnapshot();
+      }, 0);
 
       return true;
     } catch {
@@ -397,16 +490,19 @@ export default function ChessGame() {
         clearSelection();
         refreshUI("");
 
-        setTimeout(() => pushSnapshot(), 0);
+        setTimeout(() => {
+          updatePgnMoves();
+          pushSnapshot();
+        }, 0);
       }, 350);
     }
 
     return () => cancelCpuTimer();
   }, [fen, mode, playerColor, difficulty, turn, pendingPromotion, gameOverText]);
 
-  // initial
   useEffect(() => {
     refreshUI("");
+    updatePgnMoves();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -429,6 +525,8 @@ export default function ChessGame() {
     stopClock();
 
     chess.reset();
+    startFenRef.current = chess.fen();
+
     clearSelection();
     setPendingPromotion(null);
     setLastMove(null);
@@ -438,6 +536,9 @@ export default function ChessGame() {
     const init = initialTimeMs(timeControl);
     setWTimeMs(init);
     setBTimeMs(init);
+    setClockRunning(false);
+
+    setPgnMoves([]);
 
     const startSnap: Snapshot = {
       fen: chess.fen(),
@@ -451,18 +552,20 @@ export default function ChessGame() {
     setHistory([startSnap]);
 
     refreshUI("");
+    updatePgnMoves();
   }
 
   function resetTimeControl(tc: TimeControl) {
     stopClock();
     setTimeControl(tc);
+
     const init = initialTimeMs(tc);
     setWTimeMs(init);
     setBTimeMs(init);
+
     setClockRunning(false);
     lastTickRef.current = Date.now();
 
-    // do not reset game automatically; just reset clocks
     setTimeout(() => pushSnapshot(), 0);
   }
 
@@ -482,6 +585,7 @@ export default function ChessGame() {
 
   function undoCpuFullTurn() {
     if (mode !== "cpu") return;
+
     cancelCpuTimer();
     stopClock();
     clearSelection();
@@ -492,11 +596,9 @@ export default function ChessGame() {
     setHistory((h) => {
       if (h.length <= 1) return h;
 
-      // Determine how many plies to undo:
-      // if it's player's turn now, CPU has likely moved => undo 2 snapshots if possible
       const isYourTurnNow = (chess.turn() as Color) === playerColor;
-
       const undoCount = isYourTurnNow && h.length >= 3 ? 2 : 1;
+
       const targetIndex = h.length - 1 - undoCount;
       const target = h[targetIndex];
 
@@ -513,8 +615,21 @@ export default function ChessGame() {
       setTurnText(chess.turn() === "w" ? "White" : "Black");
       setInCheck(chess.inCheck());
 
+      setTimeout(() => updatePgnMoves(), 0);
+
       return h.slice(0, h.length - undoCount);
     });
+  }
+
+  function resign() {
+    if (chess.isGameOver() || gameOverText) return;
+    stopClock();
+
+    const loser = chess.turn() === "w" ? "White" : "Black";
+    const winner = loser === "White" ? "Black" : "White";
+
+    setGameOverText(`Game over — ${loser} resigned. ${winner} wins.`);
+    setStatusText("");
   }
 
   function onSquareClick(squareStr: string) {
@@ -585,12 +700,12 @@ export default function ChessGame() {
     if (isPromotionMove(from, to)) {
       setPendingPromotion({ from, to, color: chess.turn() as Color });
       setStatusText("Pick promotion piece…");
-      return false; // snapback until chosen
+      return false;
     }
 
     const ok = applyMove(from, to);
     clearSelection();
-    return ok; // false => snapback
+    return ok;
   }
 
   function choosePromotion(p: "q" | "r" | "b" | "n") {
@@ -604,7 +719,7 @@ export default function ChessGame() {
     if (!ok) setStatusText("Illegal move.");
   }
 
-  // Square styles: last move + legal highlights + checked king
+  // Styles
   const lastMoveStyles = useMemo(() => {
     if (!lastMove) return {};
     return {
@@ -624,21 +739,16 @@ export default function ChessGame() {
     const kingSq = findKingSquare(chess, chess.turn() as Color);
     if (!kingSq) return {};
     return {
-      [kingSq]: {
-        boxShadow: "inset 0 0 0 4px rgba(255, 0, 0, 0.65)",
-      },
+      [kingSq]: { boxShadow: "inset 0 0 0 4px rgba(255, 0, 0, 0.65)" },
     } as Record<string, React.CSSProperties>;
   }, [inCheck, fen, gameOverText]);
 
   const mergedSquareStyles = useMemo(() => {
-    return {
-      ...lastMoveStyles,
-      ...highlightSquares,
-      ...checkKingStyles,
-    };
+    return { ...lastMoveStyles, ...highlightSquares, ...checkKingStyles };
   }, [lastMoveStyles, highlightSquares, checkKingStyles]);
 
   const boardOrientation = mode === "cpu" ? (playerColor === "w" ? "white" : "black") : "white";
+  const showClock = timeControl !== "open";
 
   const canUndoCpu = useMemo(() => {
     if (mode !== "cpu") return false;
@@ -647,7 +757,7 @@ export default function ChessGame() {
     return history.length >= 2;
   }, [mode, history.length, fen, gameOverText]);
 
-  const showClock = timeControl !== "open";
+  const captured = useMemo(() => capturedFromFen(startFenRef.current, fen), [fen]);
 
   return (
     <div
@@ -661,15 +771,9 @@ export default function ChessGame() {
           'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
       }}
     >
-      <div style={{ maxWidth: 520, margin: "0 auto", display: "flex", flexDirection: "column", gap: 12 }}>
-        <div
-          style={{
-            border: "1px solid rgba(255,255,255,0.12)",
-            borderRadius: 16,
-            padding: 14,
-            background: "rgba(255,255,255,0.04)",
-          }}
-        >
+      <div style={{ maxWidth: 920, margin: "0 auto", display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
+        {/* Top Panel */}
+        <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 14, background: "rgba(255,255,255,0.04)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
               <button
@@ -684,7 +788,7 @@ export default function ChessGame() {
                   background: mode === "cpu" ? "white" : "transparent",
                   color: mode === "cpu" ? "black" : "white",
                   cursor: "pointer",
-                  fontWeight: 700,
+                  fontWeight: 800,
                 }}
               >
                 vs CPU
@@ -702,10 +806,27 @@ export default function ChessGame() {
                   background: mode === "friend" ? "white" : "transparent",
                   color: mode === "friend" ? "black" : "white",
                   cursor: "pointer",
-                  fontWeight: 700,
+                  fontWeight: 800,
                 }}
               >
                 vs Friend (offline)
+              </button>
+
+              <button
+                onClick={() => resign()}
+                disabled={Boolean(gameOverText) || chess.isGameOver()}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,80,80,0.12)",
+                  color: "white",
+                  cursor: Boolean(gameOverText) || chess.isGameOver() ? "not-allowed" : "pointer",
+                  fontWeight: 900,
+                  opacity: Boolean(gameOverText) || chess.isGameOver() ? 0.5 : 1,
+                }}
+              >
+                Resign
               </button>
             </div>
 
@@ -718,14 +839,14 @@ export default function ChessGame() {
                 background: "transparent",
                 color: "white",
                 cursor: "pointer",
-                fontWeight: 700,
+                fontWeight: 800,
               }}
             >
               New game
             </button>
           </div>
 
-          {/* Undo row (CPU only, always visible in CPU mode) */}
+          {/* Undo row */}
           {mode === "cpu" && (
             <div style={{ marginTop: 10 }}>
               <button
@@ -739,19 +860,15 @@ export default function ChessGame() {
                   background: canUndoCpu ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.03)",
                   color: "white",
                   cursor: canUndoCpu ? "pointer" : "not-allowed",
-                  fontWeight: 800,
+                  fontWeight: 900,
                   opacity: canUndoCpu ? 1 : 0.55,
                 }}
               >
                 Undo (CPU) — removes your move and CPU reply
               </button>
-              <div style={{ opacity: 0.65, fontSize: 12, marginTop: 6 }}>
-                Undo becomes active after at least one move is made.
-              </div>
             </div>
           )}
 
-          {/* Time control */}
           <div style={{ display: "flex", gap: 12, marginTop: 14, flexWrap: "wrap" }}>
             <div style={{ flex: "1 1 160px" }}>
               <div style={{ opacity: 0.75, fontSize: 12, marginBottom: 6 }}>Time</div>
@@ -823,40 +940,20 @@ export default function ChessGame() {
             </div>
           </div>
 
-          {/* Clocks */}
           {showClock && (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
-              <div
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 14,
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  background: (chess.turn() === "w" && !gameOverText) ? "rgba(255,255,255,0.07)" : "rgba(255,255,255,0.03)",
-                }}
-              >
+              <div style={{ padding: "10px 12px", borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: (chess.turn() === "w" && !gameOverText) ? "rgba(255,255,255,0.07)" : "rgba(255,255,255,0.03)" }}>
                 <div style={{ opacity: 0.75, fontSize: 12 }}>White</div>
                 <div style={{ fontWeight: 900, fontSize: 18 }}>{formatMs(wTimeMs)}</div>
               </div>
-
-              <div
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 14,
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  background: (chess.turn() === "b" && !gameOverText) ? "rgba(255,255,255,0.07)" : "rgba(255,255,255,0.03)",
-                }}
-              >
+              <div style={{ padding: "10px 12px", borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: (chess.turn() === "b" && !gameOverText) ? "rgba(255,255,255,0.07)" : "rgba(255,255,255,0.03)" }}>
                 <div style={{ opacity: 0.75, fontSize: 12 }}>Black</div>
                 <div style={{ fontWeight: 900, fontSize: 18 }}>{formatMs(bTimeMs)}</div>
               </div>
             </div>
           )}
 
-          <div style={{ marginTop: 10, opacity: 0.7, fontSize: 12, lineHeight: 1.35 }}>
-            Tap a piece to highlight legal moves. Drag-drop illegal moves snap back. Last move is highlighted.
-          </div>
-
-          <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+          <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
             <div style={{ padding: "10px 12px", borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)", minWidth: 180 }}>
               <div style={{ opacity: 0.8, fontSize: 12 }}>Turn</div>
               <div style={{ fontWeight: 900, fontSize: 16 }}>{turnText}</div>
@@ -883,27 +980,70 @@ export default function ChessGame() {
           </div>
         </div>
 
+        {/* Board + Side Panels */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
+          <div style={{ borderRadius: 18, overflow: "hidden", border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.02)" }}>
+            <Chessboard
+              position={fen}
+              onPieceDrop={onPieceDrop}
+              onSquareClick={onSquareClick}
+              boardOrientation={boardOrientation}
+              arePiecesDraggable={!pendingPromotion && !chess.isGameOver() && !gameOverText}
+              customSquareStyles={mergedSquareStyles}
+              customBoardStyle={{ borderRadius: 18, overflow: "hidden" }}
+            />
+          </div>
+
+          <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 12, background: "rgba(255,255,255,0.04)" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div>
+                <div style={{ opacity: 0.75, fontSize: 12 }}>Captured by White</div>
+                <div style={{ marginTop: 6, fontWeight: 900 }}>
+                  {captured.whiteCaptured.length ? captured.whiteCaptured.join(" ") : "—"}
+                </div>
+              </div>
+              <div>
+                <div style={{ opacity: 0.75, fontSize: 12 }}>Captured by Black</div>
+                <div style={{ marginTop: 6, fontWeight: 900 }}>
+                  {captured.blackCaptured.length ? captured.blackCaptured.join(" ") : "—"}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <div style={{ opacity: 0.75, fontSize: 12 }}>Move history</div>
+              <div style={{ marginTop: 8, maxHeight: 160, overflow: "auto", borderRadius: 12, border: "1px solid rgba(255,255,255,0.12)", padding: 10, background: "rgba(0,0,0,0.15)" }}>
+                {pgnMoves.length ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+                    {Array.from({ length: Math.ceil(pgnMoves.length / 2) }).map((_, i) => {
+                      const w = pgnMoves[i * 2];
+                      const b = pgnMoves[i * 2 + 1];
+                      return (
+                        <div key={i} style={{ display: "grid", gridTemplateColumns: "36px 1fr 1fr", gap: 8, alignItems: "center" }}>
+                          <div style={{ opacity: 0.7, fontSize: 12 }}>{i + 1}.</div>
+                          <div style={{ fontWeight: 900 }}>{w ?? ""}</div>
+                          <div style={{ fontWeight: 900, opacity: 0.9 }}>{b ?? ""}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ opacity: 0.7 }}>No moves yet.</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
         {gameOverText ? (
-          <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 12, background: "rgba(255,255,255,0.04)", fontWeight: 800 }}>
+          <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 12, background: "rgba(255,255,255,0.04)", fontWeight: 900 }}>
             {gameOverText}
           </div>
         ) : statusText ? (
-          <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 12, background: "rgba(255,255,255,0.04)", fontWeight: 800 }}>
+          <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 12, background: "rgba(255,255,255,0.04)", fontWeight: 900 }}>
             {statusText}
           </div>
         ) : null}
-
-        <div style={{ borderRadius: 18, overflow: "hidden", border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.02)" }}>
-          <Chessboard
-            position={fen}
-            onPieceDrop={onPieceDrop}
-            onSquareClick={onSquareClick}
-            boardOrientation={boardOrientation}
-            arePiecesDraggable={!pendingPromotion && !chess.isGameOver() && !gameOverText}
-            customSquareStyles={mergedSquareStyles}
-            customBoardStyle={{ borderRadius: 18, overflow: "hidden" }}
-          />
-        </div>
 
         <div style={{ opacity: 0.7, fontSize: 12, padding: "8px 2px", textAlign: "center" }}>
           Mode: {mode === "cpu" ? `CPU (${difficulty})` : "Friend (offline)"} · {mode === "cpu" ? `You: ${playerColor === "w" ? "White" : "Black"}` : "Pass-and-play"}
@@ -929,7 +1069,7 @@ export default function ChessGame() {
                 clearSelection();
                 setStatusText("");
               }}
-              style={{ marginTop: 12, width: "100%", padding: "12px 14px", borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: "white", cursor: "pointer", fontWeight: 800 }}
+              style={{ marginTop: 12, width: "100%", padding: "12px 14px", borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: "white", cursor: "pointer", fontWeight: 900 }}
             >
               Cancel
             </button>
