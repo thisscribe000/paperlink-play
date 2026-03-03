@@ -2,597 +2,565 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
+import type { Square, Move } from "chess.js";
 import { Chessboard } from "react-chessboard";
-import { PromotionSheet } from "./PromotionSheet";
 
 type Mode = "cpu" | "friend";
 type Difficulty = "easy" | "medium" | "hard";
-type Color = "white" | "black";
-type PromotionPiece = "q" | "r" | "b" | "n";
+type Color = "w" | "b";
 
 type PendingPromotion = {
-  from: string;
-  to: string;
-  colorToMove: Color;
+  from: Square;
+  to: Square;
+  color: Color;
 };
 
-function isPromotionMove(game: Chess, from: string, to: string) {
-  const piece = game.get(from as any);
-  if (!piece) return false;
-  if (piece.type !== "p") return false;
-
-  const toRank = to[1];
-  if (piece.color === "w" && toRank === "8") return true;
-  if (piece.color === "b" && toRank === "1") return true;
-  return false;
+function isSquare(v: string): v is Square {
+  // a1..h8
+  return /^[a-h][1-8]$/.test(v);
 }
 
-function opposite(c: Color): Color {
-  return c === "white" ? "black" : "white";
+function pieceValue(pieceType: string): number {
+  switch (pieceType) {
+    case "p":
+      return 1;
+    case "n":
+      return 3;
+    case "b":
+      return 3;
+    case "r":
+      return 5;
+    case "q":
+      return 9;
+    case "k":
+      return 100;
+    default:
+      return 0;
+  }
 }
 
-function pickCpuMove(game: Chess, difficulty: Difficulty) {
-  const moves = game.moves({ verbose: true }) as any[];
-  if (moves.length === 0) return null;
+function evalMaterial(chess: Chess): number {
+  const board = chess.board();
+  let score = 0;
+  for (const row of board) {
+    for (const p of row) {
+      if (!p) continue;
+      const v = pieceValue(p.type);
+      score += p.color === "w" ? v : -v;
+    }
+  }
+  return score;
+}
+
+function pickCpuMove(chess: Chess, difficulty: Difficulty): Move | null {
+  const moves = chess.moves({ verbose: true }) as unknown as Move[];
+  if (!moves.length) return null;
 
   if (difficulty === "easy") {
     return moves[Math.floor(Math.random() * moves.length)];
   }
 
   if (difficulty === "medium") {
-    const captures = moves.filter((m) => !!m.captured);
+    const captures = moves.filter((m: any) => m.captured);
     const pool = captures.length ? captures : moves;
     return pool[Math.floor(Math.random() * pool.length)];
   }
 
-  const value: Record<string, number> = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
-
-  const scorePosition = (g: Chess) => {
-    const b = g.board();
-    let s = 0;
-    for (const row of b) {
-      for (const p of row) {
-        if (!p) continue;
-        const v = value[p.type] ?? 0;
-        s += p.color === "w" ? v : -v;
-      }
-    }
-    return s;
-  };
-
-  const side: Color = game.turn() === "w" ? "white" : "black";
-  const wantMax = side === "white";
-
-  let best = moves[0];
-  let bestScore = wantMax ? -Infinity : Infinity;
+  // hard: simple 1-ply evaluation
+  let best: Move | null = null;
+  let bestScore = chess.turn() === "w" ? -Infinity : Infinity;
 
   for (const m of moves) {
-    const g1 = new Chess(game.fen());
-    g1.move(m);
+    const copy = new Chess(chess.fen());
+    copy.move(m as any);
+    const score = evalMaterial(copy);
 
-    const replies = g1.moves({ verbose: true }) as any[];
-    let replyScore: number;
-
-    if (replies.length === 0) {
-      replyScore = scorePosition(g1);
-      if (g1.isCheckmate()) replyScore += wantMax ? 999 : -999;
-    } else {
-      let worstForUs = wantMax ? Infinity : -Infinity;
-      for (const r of replies) {
-        const g2 = new Chess(g1.fen());
-        g2.move(r);
-        const sc = scorePosition(g2);
-        if (wantMax) {
-          if (sc < worstForUs) worstForUs = sc;
-        } else {
-          if (sc > worstForUs) worstForUs = sc;
-        }
-      }
-      replyScore = worstForUs;
-    }
-
-    if (wantMax) {
-      if (replyScore > bestScore) {
-        bestScore = replyScore;
+    if (chess.turn() === "w") {
+      if (score > bestScore) {
+        bestScore = score;
         best = m;
       }
     } else {
-      if (replyScore < bestScore) {
-        bestScore = replyScore;
+      if (score < bestScore) {
+        bestScore = score;
         best = m;
       }
     }
   }
 
-  return best;
-}
-
-function findKingSquare(g: Chess, turn: "w" | "b") {
-  const board = g.board();
-  for (let r = 0; r < 8; r++) {
-    for (let c = 0; c < 8; c++) {
-      const p = board[r][c];
-      if (!p) continue;
-      if (p.type === "k" && p.color === turn) {
-        const file = "abcdefgh"[c];
-        const rank = String(8 - r);
-        return `${file}${rank}`;
-      }
-    }
-  }
-  return null;
+  return best ?? moves[0];
 }
 
 export default function ChessGame() {
+  const chessRef = useRef(new Chess());
+  const chess = chessRef.current;
+
+  const [fen, setFen] = useState(chess.fen());
   const [mode, setMode] = useState<Mode>("cpu");
-  const [yourColor, setYourColor] = useState<Color>("white");
   const [difficulty, setDifficulty] = useState<Difficulty>("easy");
-  const [randomFirst, setRandomFirst] = useState(true);
+  const [playerColor, setPlayerColor] = useState<Color>("w");
 
-  const [game, setGame] = useState(() => new Chess());
-  const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
-  const [legalTargets, setLegalTargets] = useState<string[]>([]);
-  const [statusText, setStatusText] = useState<string>("");
-  const [statusKind, setStatusKind] = useState<"info" | "check" | "over" | "error">("info");
+  const [turnText, setTurnText] = useState("White");
+  const [inCheck, setInCheck] = useState(false);
+  const [statusText, setStatusText] = useState("");
+  const [gameOverText, setGameOverText] = useState("");
 
-  const [promotionOpen, setPromotionOpen] = useState(false);
+  const [scoreWhite, setScoreWhite] = useState(0);
+  const [scoreBlack, setScoreBlack] = useState(0);
+  const [scoreDraw, setScoreDraw] = useState(0);
+
+  const [selectedSquare, setSelectedSquare] = useState<Square | null>(null);
+  const [highlightSquares, setHighlightSquares] = useState<Record<string, React.CSSProperties>>(
+    {}
+  );
+
   const [pendingPromotion, setPendingPromotion] = useState<PendingPromotion | null>(null);
 
-  const [score, setScore] = useState({ white: 0, black: 0, draws: 0 });
+  const turn = chess.turn() as Color;
 
-  const busyCpuRef = useRef(false);
+  const isPlayerTurn = useMemo(() => {
+    if (mode === "friend") return true;
+    return turn === playerColor;
+  }, [mode, turn, playerColor]);
 
-  const fen = game.fen();
-  const turnColor: Color = game.turn() === "w" ? "white" : "black";
-  const youToMove = mode === "friend" ? true : turnColor === yourColor;
-  const gameOver = game.isGameOver();
+  function refreshUI() {
+    setFen(chess.fen());
 
-  const boardOrientation = useMemo(() => (yourColor === "white" ? "white" : "black"), [yourColor]);
+    const t = chess.turn() === "w" ? "White" : "Black";
+    setTurnText(t);
 
-  const resetHighlights = () => {
+    const check = chess.inCheck();
+    setInCheck(check);
+
+    const over = chess.isGameOver();
+    if (!over) {
+      setGameOverText("");
+    } else {
+      if (chess.isCheckmate()) {
+        const winner = chess.turn() === "w" ? "Black" : "White";
+        setGameOverText(`Game over — Checkmate. ${winner} wins.`);
+      } else if (chess.isStalemate()) {
+        setGameOverText("Game over — Draw (stalemate).");
+      } else if (chess.isThreefoldRepetition()) {
+        setGameOverText("Game over — Draw (threefold repetition).");
+      } else if (chess.isInsufficientMaterial()) {
+        setGameOverText("Game over — Draw (insufficient material).");
+      } else if (chess.isDraw()) {
+        setGameOverText("Game over — Draw.");
+      } else {
+        setGameOverText("Game over.");
+      }
+    }
+
+    if (over) setStatusText(gameOverText || "Game over.");
+    else if (check) setStatusText("Check!");
+    else setStatusText("");
+  }
+
+  function clearSelection() {
     setSelectedSquare(null);
-    setLegalTargets([]);
-  };
+    setHighlightSquares({});
+  }
 
-  const setBanner = (kind: typeof statusKind, text: string) => {
-    setStatusKind(kind);
-    setStatusText(text);
-  };
+  function legalMovesFrom(square: Square) {
+    return chess.moves({ square, verbose: true }) as any[];
+  }
 
-  const recomputeBanner = (g: Chess) => {
-    if (g.isCheckmate()) {
-      const winner = g.turn() === "w" ? "black" : "white";
-      setBanner("over", `✅ Checkmate — ${winner.toUpperCase()} wins.`);
-      return;
-    }
-    if (g.isStalemate()) {
-      setBanner("over", "✅ Game over — Draw (stalemate).");
-      return;
-    }
-    if (g.isDraw()) {
-      setBanner("over", "✅ Game over — Draw.");
-      return;
-    }
-    if (g.inCheck()) {
-      setBanner("check", "CHECK");
-      return;
-    }
-    setBanner("info", "");
-  };
+  function buildHighlights(square: Square) {
+    const moves = legalMovesFrom(square);
+    const styles: Record<string, React.CSSProperties> = {};
 
-  const safeApplyMove = (from: string, to: string, promotion?: PromotionPiece) => {
-    const g = new Chess(game.fen());
-    const move = g.move({ from, to, promotion } as any);
-    if (!move) {
-      setBanner("error", "Illegal move.");
-      return null;
+    styles[square] = {
+      background: "rgba(255,255,255,0.12)",
+      boxShadow: "inset 0 0 0 3px rgba(255,255,255,0.35)",
+    };
+
+    for (const m of moves) {
+      const to = m.to as Square;
+      const isCapture = Boolean(m.captured);
+      styles[to] = {
+        background: isCapture ? "rgba(255, 80, 80, 0.35)" : "rgba(120, 255, 120, 0.25)",
+        boxShadow: "inset 0 0 0 2px rgba(255,255,255,0.15)",
+      };
     }
-    setGame(g);
-    recomputeBanner(g);
-    return g;
-  };
 
-  const startNewGame = () => {
-    const g = new Chess();
-    setGame(g);
-    resetHighlights();
-    setPromotionOpen(false);
-    setPendingPromotion(null);
-    setBanner("info", "");
-    recomputeBanner(g);
+    setHighlightSquares(styles);
+  }
 
-    if (mode === "cpu" && randomFirst) {
-      const c: Color = Math.random() < 0.5 ? "white" : "black";
-      setYourColor(c);
+  function isPromotionMove(from: Square, to: Square): boolean {
+    const moves = chess.moves({ verbose: true }) as any[];
+    return moves.some((m) => m.from === from && m.to === to && m.promotion);
+  }
+
+  function applyMove(from: Square, to: Square, promotion?: "q" | "r" | "b" | "n"): boolean {
+    try {
+      const move = chess.move({ from, to, promotion } as any);
+      if (!move) return false;
+      refreshUI();
+      return true;
+    } catch {
+      return false;
     }
-  };
+  }
 
+  // CPU reply
   useEffect(() => {
-    recomputeBanner(game);
+    if (mode !== "cpu") return;
+    if (chess.isGameOver()) return;
+
+    if (turn !== playerColor) {
+      const timer = setTimeout(() => {
+        const move = pickCpuMove(chess, difficulty);
+        if (!move) return;
+        chess.move(move as any);
+        clearSelection();
+        refreshUI();
+      }, 350);
+
+      return () => clearTimeout(timer);
+    }
+  }, [fen, mode, playerColor, difficulty, turn]);
+
+  // initial
+  useEffect(() => {
+    refreshUI();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // score update once game ends
+  useEffect(() => {
+    if (!chess.isGameOver()) return;
+
+    if (chess.isCheckmate()) {
+      const winner: Color = chess.turn() === "w" ? "b" : "w";
+      if (winner === "w") setScoreWhite((s) => s + 1);
+      else setScoreBlack((s) => s + 1);
+      return;
+    }
+    if (chess.isDraw()) setScoreDraw((s) => s + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fen]);
 
-  useEffect(() => {
-    if (mode !== "cpu") return;
-    if (gameOver) return;
-    if (promotionOpen) return;
-    if (busyCpuRef.current) return;
+  function newGame() {
+    chess.reset();
+    clearSelection();
+    refreshUI();
+  }
 
-    const cpuColor = opposite(yourColor);
-    const cpuToMove = turnColor === cpuColor;
-    if (!cpuToMove) return;
+  function canMovePiece(piece: string): boolean {
+    const color = piece[0] as Color;
 
-    busyCpuRef.current = true;
+    if (mode === "friend") {
+      // offline pass-and-play: only side to move can move
+      return color === (chess.turn() as Color);
+    }
 
-    const t = setTimeout(() => {
-      try {
-        const g = new Chess(game.fen());
-        const move = pickCpuMove(g, difficulty);
-        if (!move) return;
+    // CPU mode: only your pieces, and only on your turn
+    return isPlayerTurn && color === playerColor;
+  }
 
-        const needsPromo = isPromotionMove(g, move.from, move.to);
-        g.move({ from: move.from, to: move.to, promotion: needsPromo ? "q" : undefined } as any);
+  function onSquareClick(squareStr: string) {
+    if (pendingPromotion) return;
+    if (chess.isGameOver()) return;
+    if (!isSquare(squareStr)) return;
 
-        setGame(g);
-        recomputeBanner(g);
-        resetHighlights();
-      } finally {
-        busyCpuRef.current = false;
-      }
-    }, 350);
-
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fen, mode, yourColor, difficulty, promotionOpen, gameOver, turnColor]);
-
-  const computeLegalTargets = (square: string) => {
-    const moves = game.moves({ square: square as any, verbose: true }) as any[];
-    return moves.map((m) => m.to);
-  };
-
-  const onSquareClick = (sq: string) => {
-    if (promotionOpen) return;
-    if (gameOver) return;
-    if (mode === "cpu" && !youToMove) return;
+    const square = squareStr as Square;
 
     if (!selectedSquare) {
-      const p = game.get(sq as any);
-      if (!p) return;
-      const isYourPieceToMove =
-        (p.color === "w" && game.turn() === "w") || (p.color === "b" && game.turn() === "b");
-      if (!isYourPieceToMove) return;
+      const piece = chess.get(square);
+      if (!piece) return;
 
-      setSelectedSquare(sq);
-      setLegalTargets(computeLegalTargets(sq));
+      const pieceKey = `${piece.color}${piece.type.toUpperCase()}`;
+      if (!canMovePiece(pieceKey)) return;
+
+      setSelectedSquare(square);
+      buildHighlights(square);
       return;
     }
 
-    if (selectedSquare === sq) {
-      resetHighlights();
+    if (selectedSquare === square) {
+      clearSelection();
       return;
     }
 
-    if (legalTargets.includes(sq)) {
-      if (isPromotionMove(game, selectedSquare, sq)) {
-        setPendingPromotion({ from: selectedSquare, to: sq, colorToMove: turnColor });
-        setPromotionOpen(true);
-        setBanner("info", "Pick promotion piece…");
-        return;
+    const moves = legalMovesFrom(selectedSquare);
+    const legalTargets = new Set<Square>(moves.map((m) => m.to as Square));
+
+    if (!legalTargets.has(square)) {
+      const piece = chess.get(square);
+      if (piece) {
+        const pieceKey = `${piece.color}${piece.type.toUpperCase()}`;
+        if (canMovePiece(pieceKey)) {
+          setSelectedSquare(square);
+          buildHighlights(square);
+          return;
+        }
       }
-
-      const next = safeApplyMove(selectedSquare, sq);
-      if (next) resetHighlights();
+      clearSelection();
       return;
     }
 
-    const p2 = game.get(sq as any);
-    if (p2) {
-      const isYourPieceToMove =
-        (p2.color === "w" && game.turn() === "w") || (p2.color === "b" && game.turn() === "b");
-      if (isYourPieceToMove) {
-        setSelectedSquare(sq);
-        setLegalTargets(computeLegalTargets(sq));
-        return;
-      }
+    if (isPromotionMove(selectedSquare, square)) {
+      setPendingPromotion({ from: selectedSquare, to: square, color: chess.turn() as Color });
+      return;
     }
 
-    resetHighlights();
-  };
+    const ok = applyMove(selectedSquare, square);
+    clearSelection();
+    if (!ok) refreshUI();
+  }
 
-  const onPieceDrop = (sourceSquare: string, targetSquare: string) => {
-    if (promotionOpen) return false;
-    if (gameOver) return false;
-    if (mode === "cpu" && !youToMove) return false;
+  function onPieceDrop(sourceSquareStr: string, targetSquareStr: string, piece: string) {
+    if (pendingPromotion) return false;
+    if (chess.isGameOver()) return false;
+    if (!canMovePiece(piece)) return false;
 
-    if (isPromotionMove(game, sourceSquare, targetSquare)) {
-      setPendingPromotion({ from: sourceSquare, to: targetSquare, colorToMove: turnColor });
-      setPromotionOpen(true);
-      setBanner("info", "Pick promotion piece…");
-      resetHighlights();
+    if (!isSquare(sourceSquareStr) || !isSquare(targetSquareStr)) return false;
+
+    const sourceSquare = sourceSquareStr as Square;
+    const targetSquare = targetSquareStr as Square;
+
+    if (sourceSquare === targetSquare) {
+      setSelectedSquare(sourceSquare);
+      buildHighlights(sourceSquare);
       return false;
     }
 
-    const next = safeApplyMove(sourceSquare, targetSquare);
-    if (next) resetHighlights();
-    return !!next;
-  };
+    if (isPromotionMove(sourceSquare, targetSquare)) {
+      setPendingPromotion({ from: sourceSquare, to: targetSquare, color: chess.turn() as Color });
+      return false; // snapback until they pick
+    }
 
-  const onPickPromotion = (p: PromotionPiece) => {
+    const ok = applyMove(sourceSquare, targetSquare);
+    clearSelection();
+    return ok; // false => snapback (what you want)
+  }
+
+  function choosePromotion(p: "q" | "r" | "b" | "n") {
     if (!pendingPromotion) return;
     const { from, to } = pendingPromotion;
 
-    safeApplyMove(from, to, p);
-    setPromotionOpen(false);
+    const ok = applyMove(from, to, p);
     setPendingPromotion(null);
-    resetHighlights();
-  };
+    clearSelection();
+    if (!ok) refreshUI();
+  }
 
-  useEffect(() => {
-    if (!game.isGameOver()) return;
-
-    if (game.isCheckmate()) {
-      const winner: Color = game.turn() === "w" ? "black" : "white";
-      setScore((s) => ({
-        ...s,
-        white: s.white + (winner === "white" ? 1 : 0),
-        black: s.black + (winner === "black" ? 1 : 0),
-      }));
-      return;
-    }
-
-    if (game.isStalemate() || game.isDraw()) {
-      setScore((s) => ({ ...s, draws: s.draws + 1 }));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameOver]);
-
-  const customSquareStyles = useMemo(() => {
-    const styles: Record<string, React.CSSProperties> = {};
-
-    if (selectedSquare) {
-      styles[selectedSquare] = {
-        boxShadow: "inset 0 0 0 4px rgba(255,255,255,.35)",
-      };
-    }
-
-    for (const t of legalTargets) {
-      styles[t] = {
-        boxShadow: "inset 0 0 0 4px rgba(0,200,255,.35)",
-      };
-    }
-
-    if (game.inCheck()) {
-      const kingSquare = findKingSquare(game, game.turn());
-      if (kingSquare) {
-        styles[kingSquare] = {
-          boxShadow: "inset 0 0 0 4px rgba(255,0,0,.55)",
-        };
-      }
-    }
-
-    return styles;
-  }, [selectedSquare, legalTargets, game]);
-
-  const pillStyle = (kind: typeof statusKind): React.CSSProperties => {
-    if (kind === "check") {
-      return {
-        padding: "8px 12px",
-        borderRadius: 999,
-        background: "rgba(255,0,0,.75)",
-        color: "white",
-        fontWeight: 800,
-        letterSpacing: 0.5,
-      };
-    }
-    if (kind === "over") {
-      return {
-        padding: "8px 12px",
-        borderRadius: 999,
-        background: "rgba(0,180,90,.45)",
-        border: "1px solid rgba(0,180,90,.55)",
-        color: "white",
-        fontWeight: 800,
-      };
-    }
-    if (kind === "error") {
-      return {
-        padding: "8px 12px",
-        borderRadius: 999,
-        background: "rgba(255,120,0,.35)",
-        border: "1px solid rgba(255,120,0,.5)",
-        color: "white",
-        fontWeight: 800,
-      };
-    }
-    return {
-      padding: "8px 12px",
-      borderRadius: 999,
-      background: "rgba(255,255,255,.06)",
-      border: "1px solid rgba(255,255,255,.14)",
-      color: "rgba(255,255,255,.85)",
-      fontWeight: 700,
-    };
-  };
+  const boardOrientation = mode === "cpu" ? (playerColor === "w" ? "white" : "black") : "white";
 
   return (
-    <div style={{ display: "grid", gap: 12 }}>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr 1fr",
-          gap: 10,
-          padding: 12,
-          borderRadius: 18,
-          border: "1px solid rgba(255,255,255,.12)",
-          background: "rgba(255,255,255,.04)",
-          color: "white",
-          fontWeight: 700,
-        }}
-      >
-        <div>White: {score.white}</div>
-        <div style={{ textAlign: "center" }}>Draws: {score.draws}</div>
-        <div style={{ textAlign: "right" }}>Black: {score.black}</div>
-      </div>
+    <div
+      style={{
+        background: "#0B1220",
+        color: "white",
+        minHeight: "100vh",
+        padding: 16,
+        boxSizing: "border-box",
+        fontFamily:
+          'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
+      }}
+    >
+      <div style={{ maxWidth: 520, margin: "0 auto", display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 14, background: "rgba(255,255,255,0.04)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <button
+                onClick={() => {
+                  setMode("cpu");
+                  newGame();
+                }}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: mode === "cpu" ? "white" : "transparent",
+                  color: mode === "cpu" ? "black" : "white",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                vs CPU
+              </button>
 
-      <div
-        style={{
-          display: "grid",
-          gap: 10,
-          padding: 12,
-          borderRadius: 18,
-          border: "1px solid rgba(255,255,255,.12)",
-          background: "rgba(255,255,255,.04)",
-        }}
-      >
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <button
-            type="button"
-            onClick={() => {
-              setMode("cpu");
-              startNewGame();
-            }}
-            style={{
-              padding: "12px 10px",
-              borderRadius: 14,
-              border: "1px solid rgba(255,255,255,.14)",
-              background: mode === "cpu" ? "white" : "rgba(255,255,255,.06)",
-              color: mode === "cpu" ? "black" : "white",
-              fontWeight: 800,
-            }}
-          >
-            vs CPU
-          </button>
+              <button
+                onClick={() => {
+                  setMode("friend");
+                  newGame();
+                }}
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: mode === "friend" ? "white" : "transparent",
+                  color: mode === "friend" ? "black" : "white",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                vs Friend (offline)
+              </button>
+            </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              setMode("friend");
-              startNewGame();
-            }}
-            style={{
-              padding: "12px 10px",
-              borderRadius: 14,
-              border: "1px solid rgba(255,255,255,.14)",
-              background: mode === "friend" ? "white" : "rgba(255,255,255,.06)",
-              color: mode === "friend" ? "black" : "white",
-              fontWeight: 800,
-            }}
-          >
-            vs Friend
-          </button>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <div>
-            <div style={{ color: "rgba(255,255,255,.7)", fontSize: 12, marginBottom: 6 }}>Your color</div>
-            <select
-              value={yourColor}
-              onChange={(e) => {
-                setYourColor(e.target.value as Color);
-                startNewGame();
-              }}
+            <button
+              onClick={() => newGame()}
               style={{
-                width: "100%",
-                padding: "12px 10px",
-                borderRadius: 14,
-                border: "1px solid rgba(255,255,255,.14)",
-                background: "rgba(255,255,255,.06)",
+                padding: "10px 14px",
+                borderRadius: 999,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: "transparent",
                 color: "white",
-                fontWeight: 700,
+                cursor: "pointer",
+                fontWeight: 600,
               }}
-              disabled={mode !== "cpu"}
             >
-              <option value="white">White</option>
-              <option value="black">Black</option>
-            </select>
+              New game
+            </button>
           </div>
 
-          <div>
-            <div style={{ color: "rgba(255,255,255,.7)", fontSize: 12, marginBottom: 6 }}>Difficulty</div>
-            <select
-              value={difficulty}
-              onChange={(e) => {
-                setDifficulty(e.target.value as Difficulty);
-                startNewGame();
-              }}
-              style={{
-                width: "100%",
-                padding: "12px 10px",
-                borderRadius: 14,
-                border: "1px solid rgba(255,255,255,.14)",
-                background: "rgba(255,255,255,.06)",
-                color: "white",
-                fontWeight: 700,
-              }}
-              disabled={mode !== "cpu"}
-            >
-              <option value="easy">Easy</option>
-              <option value="medium">Medium</option>
-              <option value="hard">Hard</option>
-            </select>
+          <div style={{ display: "flex", gap: 12, marginTop: 12, flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 180px" }}>
+              <div style={{ opacity: 0.75, fontSize: 12, marginBottom: 6 }}>Your color</div>
+              <select
+                value={playerColor}
+                onChange={(e) => {
+                  setPlayerColor(e.target.value as Color);
+                  newGame();
+                }}
+                disabled={mode !== "cpu"}
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.05)",
+                  color: "white",
+                  outline: "none",
+                  opacity: mode === "cpu" ? 1 : 0.6,
+                }}
+              >
+                <option value="w">White</option>
+                <option value="b">Black</option>
+              </select>
+            </div>
+
+            <div style={{ flex: "1 1 180px" }}>
+              <div style={{ opacity: 0.75, fontSize: 12, marginBottom: 6 }}>Difficulty</div>
+              <select
+                value={difficulty}
+                onChange={(e) => setDifficulty(e.target.value as Difficulty)}
+                disabled={mode !== "cpu"}
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.05)",
+                  color: "white",
+                  outline: "none",
+                  opacity: mode === "cpu" ? 1 : 0.6,
+                }}
+              >
+                <option value="easy">Easy</option>
+                <option value="medium">Medium</option>
+                <option value="hard">Hard</option>
+              </select>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 10, opacity: 0.7, fontSize: 12, lineHeight: 1.35 }}>
+            Tap a piece/square to highlight legal moves, then tap a highlighted square to move. Drag also works. Illegal drops snap back.
+          </div>
+
+          <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+            <div style={{ padding: "10px 12px", borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)", minWidth: 180 }}>
+              <div style={{ opacity: 0.8, fontSize: 12 }}>Turn</div>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>{turnText}</div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {inCheck && !chess.isGameOver() && (
+                <div style={{ padding: "10px 14px", borderRadius: 999, background: "rgba(255,0,0,0.25)", border: "1px solid rgba(255,0,0,0.55)", color: "white", fontWeight: 800 }}>
+                  CHECK
+                </div>
+              )}
+              {chess.isGameOver() && (
+                <div style={{ padding: "10px 14px", borderRadius: 999, background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.18)", color: "white", fontWeight: 700 }}>
+                  Game over
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 12, justifyContent: "space-between", flexWrap: "wrap", opacity: 0.9, fontSize: 13 }}>
+            <div>White: {scoreWhite}</div>
+            <div>Draws: {scoreDraw}</div>
+            <div>Black: {scoreBlack}</div>
           </div>
         </div>
 
-        {mode === "cpu" && (
-          <label style={{ display: "flex", alignItems: "center", gap: 10, color: "rgba(255,255,255,.85)" }}>
-            <input type="checkbox" checked={randomFirst} onChange={(e) => setRandomFirst(e.target.checked)} />
-            Random first mover (randomize your color on new game)
-          </label>
-        )}
+        {gameOverText ? (
+          <div style={{ border: "1px solid rgba(255,255,255,0.12)", borderRadius: 16, padding: 12, background: "rgba(255,255,255,0.04)", fontWeight: 700 }}>
+            {gameOverText}
+          </div>
+        ) : statusText ? (
+          <div style={{ border: "1px solid rgba(255,0,0,0.35)", borderRadius: 16, padding: 12, background: "rgba(255,0,0,0.10)", fontWeight: 700 }}>
+            {statusText}
+          </div>
+        ) : null}
 
-        <button
-          type="button"
-          onClick={startNewGame}
-          style={{
-            padding: "12px 10px",
-            borderRadius: 14,
-            border: "1px solid rgba(255,255,255,.14)",
-            background: "rgba(255,255,255,.06)",
-            color: "white",
-            fontWeight: 800,
-          }}
-        >
-          New game
-        </button>
+        <div style={{ borderRadius: 18, overflow: "hidden", border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.02)" }}>
+          <Chessboard
+            position={fen}
+            onPieceDrop={onPieceDrop}
+            onSquareClick={onSquareClick}
+            boardOrientation={boardOrientation}
+            arePiecesDraggable={!pendingPromotion && !chess.isGameOver()}
+            customSquareStyles={highlightSquares}
+            customBoardStyle={{ borderRadius: 18, overflow: "hidden" }}
+          />
+        </div>
+
+        <div style={{ opacity: 0.7, fontSize: 12, padding: "8px 2px", textAlign: "center" }}>
+          Mode: {mode === "cpu" ? `CPU (${difficulty})` : "Friend (offline)"} · {mode === "cpu" ? `You: ${playerColor === "w" ? "White" : "Black"}` : "Pass-and-play"}
+        </div>
       </div>
 
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: 12,
-          borderRadius: 18,
-          border: "1px solid rgba(255,255,255,.12)",
-          background: "rgba(255,255,255,.04)",
-          gap: 10,
-        }}
-      >
-        <div style={{ color: "white", fontWeight: 800 }}>Turn: {turnColor === "white" ? "White" : "Black"}</div>
-        {statusText ? <div style={pillStyle(statusKind)}>{statusText}</div> : <div />}
-      </div>
+      {pendingPromotion && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 14, boxSizing: "border-box", zIndex: 50 }}>
+          <div style={{ width: "100%", maxWidth: 520, borderRadius: 18, border: "1px solid rgba(255,255,255,0.14)", background: "#0F172A", padding: 14, boxSizing: "border-box" }}>
+            <div style={{ fontWeight: 800, fontSize: 16 }}>Promote pawn to</div>
+            <div style={{ opacity: 0.7, fontSize: 12, marginTop: 4 }}>Choose a piece.</div>
 
-      <div style={{ borderRadius: 18, overflow: "hidden", border: "1px solid rgba(255,255,255,.12)" }}>
-        <Chessboard
-          position={game.fen()}
-          onSquareClick={onSquareClick}
-          onPieceDrop={onPieceDrop}
-          boardOrientation={boardOrientation}
-          customSquareStyles={customSquareStyles}
-          arePiecesDraggable={true}
-        />
-      </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+              <button onClick={() => choosePromotion("q")} style={promoBtnStyle}>Queen</button>
+              <button onClick={() => choosePromotion("r")} style={promoBtnStyle}>Rook</button>
+              <button onClick={() => choosePromotion("b")} style={promoBtnStyle}>Bishop</button>
+              <button onClick={() => choosePromotion("n")} style={promoBtnStyle}>Knight</button>
+            </div>
 
-      <PromotionSheet
-        open={promotionOpen}
-        sideLabel={pendingPromotion?.colorToMove === "white" ? "White" : "Black"}
-        onPick={onPickPromotion}
-        onClose={() => {
-          setPromotionOpen(false);
-          setPendingPromotion(null);
-          setBanner("info", "");
-        }}
-      />
+            <button
+              onClick={() => {
+                setPendingPromotion(null);
+                clearSelection();
+              }}
+              style={{ marginTop: 12, width: "100%", padding: "12px 14px", borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: "transparent", color: "white", cursor: "pointer", fontWeight: 700 }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+const promoBtnStyle: React.CSSProperties = {
+  flex: "1 1 120px",
+  padding: "12px 14px",
+  borderRadius: 14,
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(255,255,255,0.08)",
+  color: "white",
+  cursor: "pointer",
+  fontWeight: 800,
+};
