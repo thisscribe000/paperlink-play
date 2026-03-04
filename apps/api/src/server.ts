@@ -1,15 +1,15 @@
-import Fastify from "fastify";
-import cors from "@fastify/cors";
+import "dotenv/config";
+import app from "./app";
 
-const app = Fastify({ logger: true });
+const PORT = Number(process.env.PORT || 4000);
+const HOST = process.env.HOST || "0.0.0.0";
 
-// No top-level await (CommonJS). Register without await.
-app.register(cors, {
-  origin: true, // we'll tighten later
-});
-
-app.get("/health", async () => {
-  return { ok: true };
-});
-
-export default app;
+app
+  .listen({ port: PORT, host: HOST })
+  .then((address: string) => {
+    app.log.info(`API listening at ${address}`);
+  })
+  .catch((err: unknown) => {
+    app.log.error(err);
+    process.exit(1);
+  });
