@@ -45,12 +45,35 @@ export default function ChessGame() {
   const [legalTargets, setLegalTargets] = useState<Record<string, any>>({});
   const [promo, setPromo] = useState<"q" | "r" | "b" | "n">("q");
 
-  // store a stable playerId locally
   useEffect(() => {
-    const existing = localStorage.getItem("plp_player_id");
-    const id = existing || randId();
-    if (!existing) localStorage.setItem("plp_player_id", id);
-    setPlayerId(id);
+    async function initAuth() {
+      const tg = (window as any).Telegram?.WebApp;
+      const initData = tg?.initData || localStorage.getItem("plp_init_data");
+
+      if (initData && API_URL) {
+        try {
+          const res = await fetch(`${API_URL}/v1/auth/verify`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ initData }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            localStorage.setItem("plp_init_data", initData);
+            setPlayerId(data.userId);
+            return;
+          }
+        } catch (e) {
+          console.error("Auth failed", e);
+        }
+      }
+
+      const existing = localStorage.getItem("plp_player_id");
+      const id = existing || randId();
+      if (!existing) localStorage.setItem("plp_player_id", id);
+      setPlayerId(id);
+    }
+    initAuth();
   }, []);
 
   const canMoveLocal = useMemo(() => {
@@ -107,10 +130,9 @@ export default function ChessGame() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // recompute legal moves highlights
   function computeLegalTargets(square: string) {
     const chess = chessRef.current;
-    const moves = chess.moves({ square, verbose: true }) as any[];
+    const moves = chess.moves({ square: square as any, verbose: true }) as any[];
     const map: Record<string, any> = {};
     for (const m of moves) map[m.to] = { background: "rgba(255,255,255,0.35)" };
     return map;
@@ -158,14 +180,12 @@ export default function ChessGame() {
     }
   }, [fen, mode, yourColor, difficulty]);
 
-  // ONLINE: poll server room state
   async function pollRoom(code: string) {
     if (!API_URL) return;
-    const res = await fetch(`${API_URL}/rooms/${code}`, { cache: "no-store" });
+    const res = await fetch(`${API_URL}/v1/rooms/${code}`, { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
 
-    // keep local chess in sync with server fen/pgn
     if (data.fen && data.fen !== chessRef.current.fen()) {
       chessRef.current = new Chess(data.fen);
       setFen(data.fen);
@@ -174,16 +194,9 @@ export default function ChessGame() {
       clearSelection();
     }
 
-    if (data.status && data.status !== "playing") {
-      if (data.status === "checkmate") {
-        setStatusLabel(`Checkmate — ${data.winner === "white" ? "White" : "Black"} wins.`);
-      } else if (data.status === "resigned") {
-        setStatusLabel(`${data.winner === "white" ? "White" : "Black"} wins (resignation).`);
-      } else if (data.status === "draw") {
-        setStatusLabel("Draw.");
-      }
+    if (data.status === "ended") {
+      setStatusLabel("Game ended");
     } else {
-      // still playing: server inCheck info is nice but we also compute locally
       refreshLabels();
     }
   }
@@ -200,32 +213,31 @@ export default function ChessGame() {
 
   useEffect(() => () => stopPolling(), []);
 
-  // create / join room
   async function createOnlineRoom() {
     if (!API_URL) {
       setOnlineStatus("Set NEXT_PUBLIC_API_URL first.");
       return;
     }
     setOnlineStatus("Creating room...");
-    const res = await fetch(`${API_URL}/rooms`, {
+    const res = await fetch(`${API_URL}/v1/rooms`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playerId }),
+      body: JSON.stringify({ userId: playerId }),
     });
     if (!res.ok) {
       setOnlineStatus("Failed to create room.");
       return;
     }
     const data = await res.json();
-    setRoomCode(data.code);
+    setRoomCode(data.joinCode);
     setOnlineColor("white");
-    setOnlineStatus(`Room created: ${data.code} (you are White)`);
+    setOnlineStatus(`Room created: ${data.joinCode} (you are White)`);
     chessRef.current = new Chess();
     setFen(chessRef.current.fen());
     setPgn("");
     refreshLabels();
     clearSelection();
-    startPolling(data.code);
+    startPolling(data.joinCode);
   }
 
   async function joinOnlineRoom(codeRaw: string) {
@@ -236,10 +248,10 @@ export default function ChessGame() {
       return;
     }
     setOnlineStatus("Joining room...");
-    const res = await fetch(`${API_URL}/rooms/join`, {
+    const res = await fetch(`${API_URL}/v1/rooms/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, playerId }),
+      body: JSON.stringify({ joinCode: code, userId: playerId }),
     });
     if (!res.ok) {
       setOnlineStatus("Failed to join (room full or missing).");
@@ -247,8 +259,8 @@ export default function ChessGame() {
     }
     const data = await res.json();
     setRoomCode(code);
-    setOnlineColor(data.color || "spectator");
-    setOnlineStatus(`Joined: ${code} (${data.color})`);
+    setOnlineColor(data.youAre || "spectator");
+    setOnlineStatus(`Joined: ${code} (${data.youAre})`);
     chessRef.current = new Chess(data.fen);
     setFen(data.fen);
     setPgn(data.pgn || "");
@@ -260,14 +272,13 @@ export default function ChessGame() {
   async function onlineMove(from: string, to: string, promotion?: "q" | "r" | "b" | "n") {
     if (!API_URL || !roomCode) return false;
 
-    const res = await fetch(`${API_URL}/rooms/${roomCode}/move`, {
+    const res = await fetch(`${API_URL}/v1/rooms/${roomCode}/move`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playerId, from, to, promotion }),
+      body: JSON.stringify({ userId: playerId, from, to, promotion }),
     });
 
     if (!res.ok) {
-      // illegal or not your turn -> snap back
       return false;
     }
 
@@ -282,10 +293,10 @@ export default function ChessGame() {
 
   async function resignOnline() {
     if (!API_URL || !roomCode) return;
-    await fetch(`${API_URL}/rooms/${roomCode}/resign`, {
+    await fetch(`${API_URL}/v1/rooms/${roomCode}/resign`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playerId }),
+      body: JSON.stringify({ userId: playerId }),
     });
     await pollRoom(roomCode);
   }
@@ -360,7 +371,7 @@ export default function ChessGame() {
       // async move, but react-chessboard expects sync boolean.
       // So we only allow drops that are clearly legal from local view,
       // then we sync with server; if server rejects, we’ll snap back by returning false here.
-      const moves = chessRef.current.moves({ square: from, verbose: true }) as any[];
+      const moves = chessRef.current.moves({ square: from as any, verbose: true }) as any[];
       const ok = moves.some((m) => m.to === to);
       if (!ok) return false;
 

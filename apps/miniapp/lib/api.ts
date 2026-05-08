@@ -6,7 +6,7 @@ async function j<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
-export async function apiCreateRoom(input: { name?: string; preferredColor?: "w" | "b" | "random" }) {
+export async function apiCreateRoom(input: { userId?: string; name?: string }) {
   const res = await fetch(`${API_BASE}/v1/rooms`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -15,14 +15,14 @@ export async function apiCreateRoom(input: { name?: string; preferredColor?: "w"
   return j<{
     roomId: string;
     joinCode: string;
-    token: string;
-    youAre: "w" | "b";
+    status: string;
+    youAre: "w" | "b" | null;
     fen: string;
-    invite: { joinCode: string };
+    pgn: string;
   }>(res);
 }
 
-export async function apiJoinRoom(input: { joinCode: string; name?: string }) {
+export async function apiJoinRoom(input: { joinCode: string; userId?: string }) {
   const res = await fetch(`${API_BASE}/v1/rooms/join`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -31,40 +31,34 @@ export async function apiJoinRoom(input: { joinCode: string; name?: string }) {
   return j<{
     roomId: string;
     joinCode: string;
-    token: string;
+    status: string;
     youAre: "w" | "b";
     fen: string;
+    pgn: string;
   }>(res);
 }
 
-export async function apiGetRoom(roomId: string, token?: string) {
-  const url = new URL(`${API_BASE}/v1/rooms/${roomId}`);
-  if (token) url.searchParams.set("token", token);
+export async function apiGetRoom(roomIdOrCode: string, userId?: string) {
+  const url = new URL(`${API_BASE}/v1/rooms/${roomIdOrCode}`);
+  if (userId) url.searchParams.set("userId", userId);
   const res = await fetch(url.toString(), { method: "GET" });
   return j<{
-    roomId: string;
-    joinCode: string;
+    id: string;
+    join_code: string;
     status: string;
-    winner: "w" | "b" | null;
     fen: string;
     pgn: string;
-    turn: "w" | "b";
-    moveNumber: number;
-    lastMoveUci: string | null;
-    check: boolean;
-    drawOfferedBy: "w" | "b" | null;
-    players: { white: string; black: string };
-    youAre: "w" | "b" | null;
-    updatedAt: string;
+    white_user: string;
+    black_user: string;
+    draw_offered_by: string | null;
   }>(res);
 }
 
 export async function apiMove(roomId: string, input: {
-  token: string;
+  userId: string;
   from: string;
   to: string;
   promotion?: "q" | "r" | "b" | "n";
-  clientMoveNumber: number;
 }) {
   const res = await fetch(`${API_BASE}/v1/rooms/${roomId}/move`, {
     method: "POST",
@@ -74,29 +68,29 @@ export async function apiMove(roomId: string, input: {
   return j<any>(res);
 }
 
-export async function apiResign(roomId: string, token: string) {
+export async function apiResign(roomId: string, userId: string) {
   const res = await fetch(`${API_BASE}/v1/rooms/${roomId}/resign`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ userId }),
   });
   return j<any>(res);
 }
 
-export async function apiOfferDraw(roomId: string, token: string) {
+export async function apiOfferDraw(roomId: string, userId: string) {
   const res = await fetch(`${API_BASE}/v1/rooms/${roomId}/draw/offer`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ userId }),
   });
   return j<any>(res);
 }
 
-export async function apiAcceptDraw(roomId: string, token: string) {
+export async function apiAcceptDraw(roomId: string, userId: string) {
   const res = await fetch(`${API_BASE}/v1/rooms/${roomId}/draw/accept`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ userId }),
   });
   return j<any>(res);
 }

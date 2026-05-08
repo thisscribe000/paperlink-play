@@ -1,0 +1,49 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: paperlink
+      POSTGRES_PASSWORD: paperlink
+      POSTGRES_DB: paperlink
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_URL: postgres://paperlink:paperlink@postgres:5432/paperlink
+      PORT: 4000
+      HOST: 0.0.0.0
+    depends_on:
+      - postgres
+
+  bot:
+    build:
+      context: ./apps/bot
+      dockerfile: Dockerfile
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      API_URL: http://api:4000
+      MINIAPP_URL: ${MINIAPP_URL}
+    depends_on:
+      - api
+
+  miniapp:
+    build:
+      context: ./apps/miniapp
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:4000}
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
